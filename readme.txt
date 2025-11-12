@@ -36,3 +36,22 @@ Feedback is encouraged and much appreciated, especially since this plugin is a f
 = How can I contribute to the plugin? =
 
 Contributions are always welcome! Learn more about how to get involved in the [Core Performance Team Handbook](https://make.wordpress.org/performance/handbook/get-involved/).
+
+= How do I use Cloudflare D1 with this plugin? =
+
+The plugin supports Cloudflare D1, Cloudflare's cloud-native SQLite database. To use D1 instead of a local SQLite file, add the following to your wp-config.php:
+
+`define('DB_ENGINE', 'sqlite');
+define('WP_SQLITE_AST_DRIVER', true);
+define('SQLITE_D1_ENABLE', true);
+define('SQLITE_D1_ACCOUNT_ID', 'your-cloudflare-account-id');
+define('SQLITE_D1_DATABASE_ID', 'your-d1-database-id');
+define('SQLITE_D1_API_TOKEN', 'your-cloudflare-api-token');`
+
+You can find your Cloudflare account ID and D1 database ID in the Cloudflare dashboard. The API token should have D1 read and write permissions.
+
+Optionally, you can specify a custom API URL:
+
+`define('SQLITE_D1_API_URL', 'https://api.cloudflare.com/client/v4');`
+
+This allows WordPress to run on Cloudflare Workers with a D1 database backend, enabling serverless WordPress deployments.
