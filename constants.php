@@ -56,3 +56,16 @@ if ( ! defined( 'FQDB' ) ) {
 if ( ! defined( 'WP_SQLITE_AST_DRIVER' ) && isset( $_ENV['WP_SQLITE_AST_DRIVER'] ) && 'true' === $_ENV['WP_SQLITE_AST_DRIVER'] ) {
 	define( 'WP_SQLITE_AST_DRIVER', true );
 }
+
+/**
+ * Cloudflare D1 configuration constants.
+ *
+ * When using Cloudflare D1 instead of a local SQLite file, define these constants
+ * in your wp-config.php file:
+ *
+ * define('SQLITE_D1_ENABLE', true);
+ * define('SQLITE_D1_ACCOUNT_ID', 'your-cloudflare-account-id');
+ * define('SQLITE_D1_DATABASE_ID', 'your-d1-database-id');
+ * define('SQLITE_D1_API_TOKEN', 'your-cloudflare-api-token');
+ * define('SQLITE_D1_API_URL', 'https://api.cloudflare.com/client/v4'); // Optional, defaults to production URL
+ */

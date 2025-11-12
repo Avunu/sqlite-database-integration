@@ -329,20 +329,53 @@ class WP_SQLite_DB extends wpdb {
 			require_once __DIR__ . '/../../wp-includes/sqlite-ast/class-wp-sqlite-information-schema-builder.php';
 			require_once __DIR__ . '/../../wp-includes/sqlite-ast/class-wp-sqlite-information-schema-exception.php';
 			require_once __DIR__ . '/../../wp-includes/sqlite-ast/class-wp-sqlite-information-schema-reconstructor.php';
-			$this->ensure_database_directory( FQDB );
 
-			try {
-				$connection      = new WP_SQLite_Connection(
-					array(
-						'pdo'          => $pdo,
-						'path'         => FQDB,
-						'journal_mode' => defined( 'SQLITE_JOURNAL_MODE' ) ? SQLITE_JOURNAL_MODE : null,
-					)
-				);
-				$this->dbh       = new WP_SQLite_Driver( $connection, $this->dbname );
-				$GLOBALS['@pdo'] = $this->dbh->get_connection()->get_pdo();
-			} catch ( Throwable $e ) {
-				$this->last_error = $this->format_error_message( $e );
+			// Check if Cloudflare D1 mode is enabled.
+			if ( defined( 'SQLITE_D1_ENABLE' ) && SQLITE_D1_ENABLE ) {
+				require_once __DIR__ . '/../sqlite-ast/class-wp-sqlite-d1-pdo.php';
+				require_once __DIR__ . '/../sqlite-ast/class-wp-sqlite-d1-pdo-statement.php';
+
+				// Validate D1 configuration.
+				if ( ! defined( 'SQLITE_D1_ACCOUNT_ID' ) || ! defined( 'SQLITE_D1_DATABASE_ID' ) || ! defined( 'SQLITE_D1_API_TOKEN' ) ) {
+					$this->bail(
+						'Cloudflare D1 is enabled but required configuration is missing. Please define SQLITE_D1_ACCOUNT_ID, SQLITE_D1_DATABASE_ID, and SQLITE_D1_API_TOKEN.',
+						'db_connect_fail'
+					);
+					return false;
+				}
+
+				try {
+					$api_url = defined( 'SQLITE_D1_API_URL' ) ? SQLITE_D1_API_URL : 'https://api.cloudflare.com/client/v4';
+					$d1_pdo  = new WP_SQLite_D1_PDO(
+						'sqlite::memory:',
+						SQLITE_D1_ACCOUNT_ID,
+						SQLITE_D1_DATABASE_ID,
+						SQLITE_D1_API_TOKEN,
+						$api_url
+					);
+
+					$connection      = new WP_SQLite_Connection( array( 'pdo' => $d1_pdo ) );
+					$this->dbh       = new WP_SQLite_Driver( $connection, $this->dbname );
+					$GLOBALS['@pdo'] = $this->dbh->get_connection()->get_pdo();
+				} catch ( Throwable $e ) {
+					$this->last_error = $this->format_error_message( $e );
+				}
+			} else {
+				$this->ensure_database_directory( FQDB );
+
+				try {
+					$connection      = new WP_SQLite_Connection(
+						array(
+							'pdo'          => $pdo,
+							'path'         => FQDB,
+							'journal_mode' => defined( 'SQLITE_JOURNAL_MODE' ) ? SQLITE_JOURNAL_MODE : null,
+						)
+					);
+					$this->dbh       = new WP_SQLite_Driver( $connection, $this->dbname );
+					$GLOBALS['@pdo'] = $this->dbh->get_connection()->get_pdo();
+				} catch ( Throwable $e ) {
+					$this->last_error = $this->format_error_message( $e );
+				}
 			}
 		} else {
 			$this->dbh        = new WP_SQLite_Translator( $pdo );
