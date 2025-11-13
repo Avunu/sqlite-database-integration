@@ -15,7 +15,11 @@
  * ==========================================================================
  *
  * To use Cloudflare D1 with this WordPress installation, add the following
- * constants to your wp-config.php file:
+ * constants to your wp-config.php file.
+ *
+ * REQUIREMENTS:
+ * - PHP cURL extension (ext-curl) must be enabled
+ * - SQLite AST driver must be enabled
  */
 
 // Enable SQLite database engine.

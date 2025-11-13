@@ -6,6 +6,8 @@
  * executing them locally. It maintains compatibility with the existing SQLite
  * driver architecture while enabling cloud-native database operations.
  *
+ * Requires: PHP cURL extension (ext-curl)
+ *
  * @package wp-sqlite-integration
  * @since 3.0.0
  */
@@ -20,6 +22,7 @@
  *
  * This class implements a PDO-compatible interface that sends queries to
  * Cloudflare's D1 database API instead of using a local SQLite file.
+ * Uses cURL for HTTP communication to avoid dependency on WordPress functions.
  */
 class WP_SQLite_D1_PDO extends PDO {
 	/**
@@ -113,33 +116,47 @@ class WP_SQLite_D1_PDO extends PDO {
 			$this->database_id
 		);
 
-		$body = wp_json_encode(
+		$body = json_encode(
 			array(
 				'sql'    => $sql,
 				'params' => array_values( $params ),
 			)
 		);
 
-		$response = wp_remote_post(
-			$endpoint,
+		// Initialize cURL.
+		$ch = curl_init( $endpoint );
+		if ( false === $ch ) {
+			throw new PDOException( 'Failed to initialize cURL' );
+		}
+
+		// Set cURL options.
+		curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
+		curl_setopt( $ch, CURLOPT_POST, true );
+		curl_setopt( $ch, CURLOPT_POSTFIELDS, $body );
+		curl_setopt( $ch, CURLOPT_TIMEOUT, 30 );
+		curl_setopt(
+			$ch,
+			CURLOPT_HTTPHEADER,
 			array(
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $this->api_token,
-					'Content-Type'  => 'application/json',
-					'Accept'        => 'application/json',
-				),
-				'body'    => $body,
-				'timeout' => 30,
+				'Authorization: Bearer ' . $this->api_token,
+				'Content-Type: application/json',
+				'Accept: application/json',
 			)
 		);
 
-		if ( is_wp_error( $response ) ) {
-			throw new PDOException( $response->get_error_message() );
+		// Execute request.
+		$response_body = curl_exec( $ch );
+		$response_code = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+		$curl_error    = curl_error( $ch );
+		curl_close( $ch );
+
+		// Check for cURL errors.
+		if ( false === $response_body ) {
+			throw new PDOException( 'cURL request failed: ' . $curl_error );
 		}
 
-		$response_code = wp_remote_retrieve_response_code( $response );
-		$response_body = wp_remote_retrieve_body( $response );
-		$data          = json_decode( $response_body, true );
+		// Parse response.
+		$data = json_decode( $response_body, true );
 
 		if ( 200 !== $response_code || ! isset( $data['success'] ) || ! $data['success'] ) {
 			$error_message = isset( $data['errors'][0]['message'] ) ? $data['errors'][0]['message'] : 'Unknown D1 API error';

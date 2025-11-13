@@ -48,7 +48,7 @@ define('SQLITE_D1_ACCOUNT_ID', 'your-cloudflare-account-id');
 define('SQLITE_D1_DATABASE_ID', 'your-d1-database-id');
 define('SQLITE_D1_API_TOKEN', 'your-cloudflare-api-token');`
 
-You can find your Cloudflare account ID and D1 database ID in the Cloudflare dashboard. The API token should have D1 read and write permissions.
+You can find your Cloudflare account ID and D1 database ID in the Cloudflare dashboard. The API token should have D1 read and write permissions. Note: The D1 driver requires the cURL PHP extension.
 
 Optionally, you can specify a custom API URL:
 
