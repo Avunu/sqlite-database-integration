@@ -17,16 +17,35 @@ class WP_SQLite_D1_Exception extends PDOException {
 	/**
 	 * Create an exception from a proxy error response.
 	 *
+	 * The error message is normalized to the PDO SQLite shape, e.g.:
+	 *
+	 *   SQLSTATE[23000]: Integrity constraint violation: 19 UNIQUE constraint failed: t.name
+	 *
+	 * D1 error messages wrap the SQLite error message with a "D1_ERROR: "
+	 * style prefix and an ": SQLITE_*" suffix, which are stripped here.
+	 *
 	 * @param  string|null $error_code  The proxy error code, e.g. "SQLITE_CONSTRAINT".
 	 * @param  string      $message     The original error message.
 	 * @param  int|null    $http_status The HTTP status of the response, if any.
 	 * @return self
 	 */
 	public static function from_proxy_error( ?string $error_code, string $message, ?int $http_status = null ): self {
+		// Strip the D1 message decorations around the SQLite error message.
+		$message = preg_replace( '/^D1_[A-Z_]*ERROR: /', '', $message );
+		$message = preg_replace( '/: SQLITE_[A-Z_]+$/', '', $message );
+
 		if ( null !== $error_code && 0 === strpos( $error_code, 'SQLITE_CONSTRAINT' ) ) {
+			// SQLite error code 19: SQLITE_CONSTRAINT.
 			$sqlstate = '23000';
-		} else {
+			$message  = 'Integrity constraint violation: 19 ' . $message;
+		} elseif ( 'SQLITE_BUSY' === $error_code || 'SQLITE_LOCKED' === $error_code ) {
+			// SQLite error codes 5 and 6: SQLITE_BUSY and SQLITE_LOCKED.
 			$sqlstate = 'HY000';
+			$message  = 'General error: 5 ' . $message;
+		} else {
+			// SQLite error code 1: SQLITE_ERROR (also used as a fallback).
+			$sqlstate = 'HY000';
+			$message  = 'General error: 1 ' . $message;
 		}
 
 		return self::create( $sqlstate, $message );

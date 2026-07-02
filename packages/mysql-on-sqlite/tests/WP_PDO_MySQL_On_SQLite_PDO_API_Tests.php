@@ -21,7 +21,8 @@ class WP_PDO_MySQL_On_SQLite_PDO_API_Tests extends TestCase {
 	private $driver;
 
 	public function setUp(): void {
-		$this->driver = new WP_PDO_MySQL_On_SQLite( 'mysql-on-sqlite:path=:memory:;dbname=wp;' );
+		wp_sqlite_tests_skip_unsupported( $this );
+		$this->driver = wp_sqlite_tests_create_pdo_engine( 'mysql-on-sqlite:path=:memory:;dbname=wp;' );
 
 		// Run all tests with stringified fetch mode results, so we can use
 		// assertions that are consistent across all tested PHP versions.

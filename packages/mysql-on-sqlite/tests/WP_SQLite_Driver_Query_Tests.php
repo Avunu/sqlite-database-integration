@@ -104,12 +104,8 @@ class WP_SQLite_Driver_Query_Tests extends TestCase {
 		global $tables;
 		$queries = explode( ';', $tables );
 
-		$pdo_class    = PHP_VERSION_ID >= 80400 ? PDO\SQLite::class : PDO::class;
-		$this->sqlite = new $pdo_class( 'sqlite::memory:' );
-		$this->engine = new WP_SQLite_Driver(
-			new WP_SQLite_Connection( array( 'pdo' => $this->sqlite ) ),
-			'wp'
-		);
+		wp_sqlite_tests_skip_unsupported( $this );
+		$this->engine = wp_sqlite_tests_create_engine( $this->sqlite );
 
 		try {
 			$this->engine->begin_transaction();

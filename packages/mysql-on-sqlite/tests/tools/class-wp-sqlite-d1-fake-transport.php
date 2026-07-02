@@ -34,6 +34,13 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 	private $log = array();
 
 	/**
+	 * The stringification setting to restore after internal fetches.
+	 *
+	 * @var bool
+	 */
+	private $external_stringify = false;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param PDO|null $pdo Optional. A PDO SQLite instance to use.
@@ -41,6 +48,19 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 	public function __construct( ?PDO $pdo = null ) {
 		$this->pdo = $pdo ?? new PDO( 'sqlite::memory:' );
 		$this->pdo->setAttribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
+
+		// D1 always enforces foreign keys.
+		$this->pdo->query( 'PRAGMA foreign_keys = ON' );
+
+		// Capture the handle's stringification setting, to restore it after
+		// internal fetches. Reading the attribute requires PHP 8.1+; older
+		// versions assume the tests' backend factory setting (true) for
+		// injected handles.
+		if ( PHP_VERSION_ID >= 80100 ) {
+			$this->external_stringify = (bool) $this->pdo->getAttribute( PDO::ATTR_STRINGIFY_FETCHES );
+		} else {
+			$this->external_stringify = null !== $pdo;
+		}
 	}
 
 	/**
@@ -145,6 +165,14 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 	private function run( string $sql, array $params ): array {
 		$this->log[] = array( $sql, $params );
 
+		/*
+		 * Fetch with value stringification disabled, independently of the
+		 * attribute set on the PDO handle: the D1 protocol carries native
+		 * JSON types. The attribute is restored afterwards, so that tests
+		 * can make stringified assertions against the raw handle.
+		 */
+		$this->pdo->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, false );
+
 		try {
 			$stmt = $this->pdo->prepare( $sql );
 			$stmt->execute( array_values( $params ) );
@@ -153,10 +181,15 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 			$message = $e->getMessage();
 			$matches = array();
 			preg_match( '/SQLSTATE\[[^\]]+\]: [^:]+: \d+ (.*)/s', $message, $matches );
+
+			$is_constraint_error = false !== strpos( $message, 'constraint failed' )
+				|| false !== strpos( $message, 'cannot store' );
 			throw WP_SQLite_D1_Exception::from_proxy_error(
-				false !== strpos( $message, 'UNIQUE constraint' ) ? 'SQLITE_CONSTRAINT' : 'SQLITE_ERROR',
+				$is_constraint_error ? 'SQLITE_CONSTRAINT' : 'SQLITE_ERROR',
 				sprintf( 'D1_ERROR: %s: SQLITE_ERROR', $matches[1] ?? $message )
 			);
+		} finally {
+			$this->pdo->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, $this->external_stringify );
 		}
 
 		$is_read = 1 === preg_match( '/^\s*(SELECT|PRAGMA|EXPLAIN|WITH)\b/i', $sql );
