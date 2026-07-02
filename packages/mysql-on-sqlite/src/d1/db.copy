@@ -72,13 +72,20 @@ if ( ! defined( 'DB_ENGINE' ) ) {
 	define( 'DB_ENGINE', 'd1' );
 }
 
-// Require the driver and the D1 backend from the plugin.
+/*
+ * Require the driver and the D1 backend from the plugin.
+ *
+ * Note that the plugin's "install-functions.php" is intentionally NOT
+ * loaded: its installer creates WordPress tables over a separate local
+ * SQLite connection. On D1, the WordPress installer must run through
+ * $wpdb (the core "wp_install()" and "dbDelta()" path), which executes
+ * the schema against the remote database.
+ */
 require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/version.php';
 require_once $sqlite_plugin_implementation_folder_path . '/constants.php';
 require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/load.php';
 require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/d1/load.php';
 require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/class-wp-sqlite-db.php';
-require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/install-functions.php';
 
 /**
  * A WordPress database access class connecting to Cloudflare D1.
