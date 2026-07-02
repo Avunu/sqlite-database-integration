@@ -44,12 +44,6 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	const GLOBAL_VARIABLES_TABLE_NAME = self::RESERVED_PREFIX . 'global_variables';
 
 	/**
-	 * Name of the connection-private TEMP table used to build empty result sets
-	 * without acquiring a write lock on the database. See create_result_statement_from_data().
-	 */
-	const EMPTY_RESULT_TABLE_NAME = self::RESERVED_PREFIX . 'empty_result';
-
-	/**
 	 * The name of the SQLite driver version variable.
 	 *
 	 * This internal variable is used to store the latest version of the SQLite
@@ -532,14 +526,6 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * @var bool
 	 */
 	private $is_readonly;
-
-	/**
-	 * Whether the TEMP table backing empty result sets has been created on this
-	 * connection. See create_result_statement_from_data().
-	 *
-	 * @var bool
-	 */
-	private $empty_result_table_ready = false;
 
 	/**
 	 * Type of wrapper transaction that is active for the MySQL query emulation.
@@ -7004,101 +6990,27 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	}
 
 	/**
-	 * Create a PDO SQLite statement from the specified columns and rows.
+	 * Create a PDO statement from the specified columns and rows.
 	 *
 	 * Some emulated MySQL queries don't have an SQLite counterpart and their
 	 * result data may be generated without a corresponding SQLite statement.
-	 * In such cases, we can generate a simple SQLite SELECT query that will
-	 * provide us with the PDOStatement API for the given column and row data.
+	 * In such cases, we create an in-memory statement that provides us with
+	 * the PDOStatement API for the given column and row data, without any
+	 * interaction with the SQLite database.
 	 *
 	 * @param  array $columns The columns of the result set.
 	 * @param  array $rows    The rows of the result set.
-	 * @return PDOStatement   The corresponding PDO SQLite statement.
+	 * @return PDOStatement   The corresponding PDO statement.
 	 */
 	private function create_result_statement_from_data( array $columns, array $rows ): PDOStatement {
-		$pdo = $this->connection->get_pdo();
-
-		/*
-		 * With 0 columns, we need to create a PDO statement that has no columns.
-		 * This can be done using a noop INSERT statement that modifies no data.
-		 */
-		if ( 0 === count( $columns ) ) {
-			/*
-			 * Build a 0-column statement to represent an empty result set.
-			 *
-			 * A no-op "INSERT ... WHERE FALSE" into a regular table still acquires
-			 * SQLite's write lock, even though it writes nothing. That makes
-			 * no-write statements such as "SET sql_mode = ..." fatal with
-			 * "database is locked" whenever another connection holds the write
-			 * lock. Writing to a connection-private TEMP table uses the temp
-			 * database, which has no shared lock, so it never contends.
-			 */
-			if ( ! $this->empty_result_table_ready ) {
-				$pdo->exec(
-					sprintf(
-						'CREATE TEMP TABLE IF NOT EXISTS %s ( placeholder_for_empty_insert )',
-						$this->quote_sqlite_identifier( self::EMPTY_RESULT_TABLE_NAME )
-					)
-				);
-				$this->empty_result_table_ready = true;
-			}
-			return $pdo->query(
-				sprintf(
-					'INSERT INTO %s ( placeholder_for_empty_insert ) SELECT NULL WHERE FALSE',
-					$this->quote_sqlite_identifier( self::EMPTY_RESULT_TABLE_NAME )
-				)
-			);
-		}
-
-		/*
-		 * Create an SQLite statement that returns the specified columns and rows.
-		 * This can be done using a SELECT statement in the following form:
-		 *
-		 *   -- A dummy header row to assign correct column names.
-		 *   SELECT NULL AS `col1`, NULL AS `col2`, ... WHERE FALSE
-		 *
-		 *   UNION ALL
-		 *
-		 *   -- The actual data rows.
-		 *   VALUES
-		 *     (val11, val12, ...),
-		 *     (val21, val22, ...),
-		 *     ...
-		 */
-
-		// Construct column header row ("SELECT <column-list> WHERE FALSE").
-		$query = 'SELECT ';
-		foreach ( $columns as $i => $column ) {
-			$query .= $i > 0 ? ', ' : '';
-			$query .= 'NULL AS ' . $pdo->quote( $column );
-		}
-		$query .= ' WHERE FALSE';
-
-		// UNION ALL
-		if ( count( $rows ) > 0 ) {
-			$query .= ' UNION ALL VALUES ';
-		}
-
-		// Construct data rows ("VALUES <row-list>").
-		foreach ( $rows as $i => $row ) {
-			$query .= $i > 0 ? ', ' : '';
-			$query .= '(';
-			foreach ( array_values( $row ) as $j => $value ) {
-				$query .= $j > 0 ? ', ' : '';
-				if ( null === $value ) {
-					$query .= 'NULL';
-				} elseif ( is_string( $value ) && strpos( $value, "\0" ) !== false ) {
-					// Handle null characters; see self::translate_string_literal().
-					$query .= sprintf( "CAST(x'%s' AS TEXT)", bin2hex( $value ) );
-				} elseif ( is_string( $value ) ) {
-					$query .= $pdo->quote( $value );
-				} else {
-					$query .= $value;
-				}
-			}
-			$query .= ')';
-		}
-		return $pdo->query( $query );
+		return new WP_PDO_Array_Statement(
+			$columns,
+			$rows,
+			0,
+			(bool) $this->connection->get_attribute( PDO::ATTR_STRINGIFY_FETCHES ),
+			array(),
+			(int) $this->connection->get_attribute( PDO::ATTR_DEFAULT_FETCH_MODE )
+		);
 	}
 
 	/**
