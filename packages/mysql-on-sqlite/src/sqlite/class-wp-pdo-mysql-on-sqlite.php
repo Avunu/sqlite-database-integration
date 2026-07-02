@@ -829,7 +829,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 
 			// When the default FETCH_BOTH is not set explicitly, additional
 			// arguments are ignored, and the argument count is not validated.
-			$fetch_mode      = $this->connection->get_pdo()->getAttribute( PDO::ATTR_DEFAULT_FETCH_MODE );
+			$fetch_mode      = $this->connection->get_attribute( PDO::ATTR_DEFAULT_FETCH_MODE );
 			$fetch_mode_args = array();
 		} elseif ( PDO::FETCH_COLUMN === $fetch_mode ) {
 			if ( 3 !== $arg_count ) {
@@ -1080,7 +1080,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * @return bool            True on success, false on failure.
 	 */
 	public function setAttribute( $attribute, $value ): bool {
-		return $this->connection->get_pdo()->setAttribute( $attribute, $value );
+		return $this->connection->set_attribute( $attribute, $value );
 	}
 
 	/**
@@ -1095,7 +1095,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 */
 	#[ReturnTypeWillChange]
 	public function getAttribute( $attribute ) {
-		return $this->connection->get_pdo()->getAttribute( $attribute );
+		return $this->connection->get_attribute( $attribute );
 	}
 
 	/**
