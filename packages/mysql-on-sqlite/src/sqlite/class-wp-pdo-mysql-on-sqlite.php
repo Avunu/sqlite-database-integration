@@ -446,7 +446,9 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	/**
 	 * User-defined functions registered on the SQLite connection.
 	 *
-	 * @var WP_SQLite_PDO_User_Defined_Functions
+	 * This is null for connections without user-defined function support.
+	 *
+	 * @var WP_SQLite_PDO_User_Defined_Functions|null
 	 */
 	private $user_defined_functions;
 
@@ -548,6 +550,25 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * @var bool
 	 */
 	private $table_lock_active = false;
+
+	/**
+	 * Fallback behavior for connections without transaction support.
+	 *
+	 * One of "warn", "error", or "ignore".
+	 * See the "handle_unsupported_transaction_statement()" method.
+	 *
+	 * @var string
+	 */
+	private $transaction_fallback = 'warn';
+
+	/**
+	 * Whether an unsupported transaction warning was already issued.
+	 *
+	 * This is used to trigger the warning only once per driver instance.
+	 *
+	 * @var bool
+	 */
+	private $transaction_fallback_warning_issued = false;
 
 	/**
 	 * The PDO fetch mode used for the emulated query.
@@ -748,8 +769,14 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		// Enable foreign keys. By default, they are off.
 		$this->connection->query( 'PRAGMA foreign_keys = ON' );
 
+		// Configure the fallback behavior for connections without transaction
+		// support. One of "warn" (default), "error", or "ignore".
+		$this->transaction_fallback = $options['transaction_fallback'] ?? 'warn';
+
 		// Register SQLite functions.
-		$this->user_defined_functions = WP_SQLite_PDO_User_Defined_Functions::register_for( $this->connection );
+		if ( $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_USER_DEFINED_FUNCTIONS ) ) {
+			$this->user_defined_functions = WP_SQLite_PDO_User_Defined_Functions::register_for( $this->connection );
+		}
 
 		// Load MySQL grammar.
 		if ( null === self::$mysql_grammar ) {
@@ -1593,6 +1620,15 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 			return;
 		}
 
+		/*
+		 * Without transaction support, single statements are the unit of
+		 * atomicity, and multi-statement emulations are executed without
+		 * a wrapper transaction (with batching used where possible).
+		 */
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TRANSACTIONS ) ) {
+			return;
+		}
+
 		if ( $this->inTransaction() ) {
 			$this->connection->savepoint( $this->get_internal_savepoint_name( 'wrapper' ) );
 			$this->wrapper_transaction_type = 'savepoint';
@@ -1624,6 +1660,11 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * Execute the "BEGIN" or "START TRANSACTION" MySQL statement in SQLite.
 	 */
 	private function begin_user_transaction(): void {
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TRANSACTIONS ) ) {
+			$this->handle_unsupported_transaction_statement( 'START TRANSACTION' );
+			return;
+		}
+
 		// MySQL implicitly commits previous transaction when starting a new one.
 		if ( $this->inTransaction() ) {
 			$this->commit_user_transaction();
@@ -1665,6 +1706,44 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	}
 
 	/**
+	 * Handle a transactional MySQL statement on a connection without
+	 * transaction support.
+	 *
+	 * The behavior is configured by the "transaction_fallback" driver option:
+	 *
+	 *   - "warn"   Ignore the statement and trigger a PHP warning.
+	 *              The warning is issued only once per driver instance.
+	 *   - "error"  Throw a driver exception.
+	 *   - "ignore" Silently ignore the statement.
+	 *
+	 * Because single statements are always atomic, ignoring transactional
+	 * statements results in autocommit-like behavior: all statements take
+	 * effect immediately and a ROLLBACK cannot undo them.
+	 *
+	 * @param  string $statement          The MySQL statement type being handled.
+	 * @throws WP_SQLite_Driver_Exception When the fallback behavior is "error".
+	 */
+	private function handle_unsupported_transaction_statement( string $statement ): void {
+		if ( 'error' === $this->transaction_fallback ) {
+			throw $this->new_not_supported_exception(
+				sprintf( '%s (the connection does not support transactions)', $statement )
+			);
+		}
+
+		if ( 'warn' === $this->transaction_fallback && ! $this->transaction_fallback_warning_issued ) {
+			$this->transaction_fallback_warning_issued = true;
+			trigger_error(
+				sprintf(
+					'MySQL-on-SQLite driver: "%s" was ignored. The database connection does not'
+					. ' support transactions, so all statements are committed immediately.',
+					$statement
+				),
+				E_USER_WARNING
+			);
+		}
+	}
+
+	/**
 	 * Execute a MySQL transaction or locking statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "transactionOrLockingStatement" AST node.
@@ -1691,6 +1770,15 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				break;
 			case 'savepointStatement':
 				$savepoint_name = $this->translate( $subnode->get_first_child_node( 'identifier' ) );
+
+				if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_SAVEPOINTS ) ) {
+					if ( null === $savepoint_name && WP_MySQL_Lexer::ROLLBACK_SYMBOL === $token->id ) {
+						$this->rollback_user_transaction();
+					} else {
+						$this->handle_unsupported_transaction_statement( 'SAVEPOINT' );
+					}
+					return;
+				}
 
 				// ROLLBACK/ROLLBACK TO SAVEPOINT <identifier>.
 				if ( WP_MySQL_Lexer::ROLLBACK_SYMBOL === $token->id ) {
@@ -2376,6 +2464,14 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 
 		// Handle TEMPORARY keyword.
 		$table_is_temporary = $subnode->has_child_token( WP_MySQL_Lexer::TEMPORARY_SYMBOL );
+		if (
+			$table_is_temporary
+			&& ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TEMPORARY_TABLES )
+		) {
+			throw $this->new_not_supported_exception(
+				'CREATE TEMPORARY TABLE (the connection does not support temporary tables)'
+			);
+		}
 
 		// Handle CREATE TABLE ... [AS] SELECT.
 		$element_list = $subnode->get_first_child_node( 'tableElementList' );
@@ -6964,7 +7060,9 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$this->last_column_meta         = array();
 		$this->is_readonly              = false;
 		$this->wrapper_transaction_type = null;
-		$this->user_defined_functions->flush();
+		if ( null !== $this->user_defined_functions ) {
+			$this->user_defined_functions->flush();
+		}
 	}
 
 	/**

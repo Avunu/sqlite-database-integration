@@ -376,6 +376,11 @@ class WP_SQLite_Information_Schema_Builder {
 	 * @return bool               True if the temporary table exists, false otherwise.
 	 */
 	public function temporary_table_exists( string $table_name ): bool {
+		// Temporary tables can't exist on connections that don't support them.
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TEMPORARY_TABLES ) ) {
+			return false;
+		}
+
 		/*
 		 * We could search in the "{$this->temporary_table_prefix}tables" table,
 		 * but it may not exist yet, so using "sqlite_temp_master" is simpler.
@@ -460,6 +465,10 @@ class WP_SQLite_Information_Schema_Builder {
 	 * the SQLite database. Tables that are missing will be created.
 	 */
 	public function ensure_temporary_information_schema_tables(): void {
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TEMPORARY_TABLES ) ) {
+			return;
+		}
+
 		$sqlite_version         = $this->connection->get_server_version();
 		$supports_strict_tables = version_compare( $sqlite_version, '3.37.0', '>=' );
 		foreach ( self::INFORMATION_SCHEMA_TABLE_DEFINITIONS as $table_name => $table_body ) {
