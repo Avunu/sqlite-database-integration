@@ -2518,15 +2518,17 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$this->information_schema_builder->record_create_table( $node );
 
 		// Generate CREATE TABLE statement from the information schema tables.
-		$queries            = $this->get_sqlite_create_table_statement( $table_is_temporary, $table_name );
-		$create_table_query = $queries[0];
-		$constraint_queries = array_slice( $queries, 1 );
-
-		$this->execute_sqlite_query( $create_table_query );
-
-		foreach ( $constraint_queries as $query ) {
-			$this->execute_sqlite_query( $query );
-		}
+		// The statements are composed as a batch, so that backends with batch
+		// support can execute them atomically in a single call.
+		$queries = $this->get_sqlite_create_table_statement( $table_is_temporary, $table_name );
+		$this->connection->execute_batch(
+			array_map(
+				function ( $query ) {
+					return array( $query );
+				},
+				$queries
+			)
+		);
 
 		// Apply AUTO_INCREMENT = N table option, if any.
 		$this->apply_auto_increment_table_option( $table_is_temporary, $table_name, $node );
@@ -5093,17 +5095,25 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$pragma_foreign_keys = $this->execute_sqlite_query( 'PRAGMA foreign_keys' )->fetchColumn();
 		$this->execute_sqlite_query( 'PRAGMA foreign_keys = OFF' );
 
-		// 2. Create a new table with the new schema.
 		$tmp_table_name        = self::RESERVED_PREFIX . "tmp_{$table_name}_" . uniqid();
 		$quoted_table_name     = $this->quote_sqlite_identifier( $table_name );
 		$quoted_tmp_table_name = $this->quote_sqlite_identifier( $tmp_table_name );
 		$queries               = $this->get_sqlite_create_table_statement( $table_is_temporary, $table_name, $tmp_table_name );
 		$create_table_query    = $queries[0];
 		$constraint_queries    = array_slice( $queries, 1 );
-		$this->execute_sqlite_query( $create_table_query );
+
+		/*
+		 * Compose steps 2 to 6 as a batch. None of the statements consume
+		 * results of the previous ones, so backends with batch support can
+		 * execute the whole table recreation atomically in a single call.
+		 */
+		$statements = array();
+
+		// 2. Create a new table with the new schema.
+		$statements[] = array( $create_table_query );
 
 		// 3. Copy data from the original table to the new table.
-		$this->execute_sqlite_query(
+		$statements[] = array(
 			sprintf(
 				'INSERT INTO %s (%s) SELECT %s FROM %s',
 				$quoted_tmp_table_name,
@@ -5116,25 +5126,27 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 					array_map( array( $this, 'quote_sqlite_identifier' ), array_keys( $column_map ) )
 				),
 				$quoted_table_name
-			)
+			),
 		);
 
 		// 4. Drop the original table.
-		$this->execute_sqlite_query( sprintf( 'DROP TABLE %s', $quoted_table_name ) );
+		$statements[] = array( sprintf( 'DROP TABLE %s', $quoted_table_name ) );
 
 		// 5. Rename the new table to the original table name.
-		$this->execute_sqlite_query(
+		$statements[] = array(
 			sprintf(
 				'ALTER TABLE %s RENAME TO %s',
 				$quoted_tmp_table_name,
 				$quoted_table_name
-			)
+			),
 		);
 
 		// 6. Reconstruct indexes, triggers, and views.
 		foreach ( $constraint_queries as $query ) {
-			$this->execute_sqlite_query( $query );
+			$statements[] = array( $query );
 		}
+
+		$this->connection->execute_batch( $statements );
 
 		// 7. If foreign key constraints were enabled, verify and enable them.
 		if ( '1' === $pragma_foreign_keys ) {
