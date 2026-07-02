@@ -453,6 +453,17 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	private $user_defined_functions;
 
 	/**
+	 * Whether the connection supports user-defined functions.
+	 *
+	 * When it does not, MySQL functions that are normally emulated with
+	 * user-defined SQL functions are translated to plain SQLite expressions
+	 * where possible. See the "translate_function_call_without_udfs()" method.
+	 *
+	 * @var bool
+	 */
+	private $supports_udfs = true;
+
+	/**
 	 * A service for managing MySQL INFORMATION_SCHEMA tables in SQLite.
 	 *
 	 * @var WP_SQLite_Information_Schema_Builder
@@ -774,7 +785,8 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$this->transaction_fallback = $options['transaction_fallback'] ?? 'warn';
 
 		// Register SQLite functions.
-		if ( $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_USER_DEFINED_FUNCTIONS ) ) {
+		$this->supports_udfs = $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_USER_DEFINED_FUNCTIONS );
+		if ( $this->supports_udfs ) {
 			$this->user_defined_functions = WP_SQLite_PDO_User_Defined_Functions::register_for( $this->connection );
 		}
 
@@ -4506,10 +4518,26 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 
 		if ( true === $is_binary ) {
 			$children = $node->get_children();
-			return sprintf(
-				'GLOB _helper_like_to_glob_pattern(%s)',
-				$this->translate( $children[1] )
-			);
+			$pattern  = $this->translate( $children[1] );
+
+			if ( ! $this->supports_udfs ) {
+				// Convert constant patterns to GLOB in PHP at translation time.
+				// A trailing COLLATE clause doesn't change the literal value.
+				$literal = $pattern;
+				if ( 1 === preg_match( '/^(.*) COLLATE BINARY$/', $literal, $matches ) ) {
+					$literal = $matches[1];
+				}
+				$pattern_value = $this->get_string_literal_value( $literal );
+				if ( null === $pattern_value ) {
+					throw $this->new_not_supported_exception(
+						'LIKE BINARY with a non-constant pattern (the connection does not support user-defined functions)'
+					);
+				}
+				$helper = new WP_SQLite_PDO_User_Defined_Functions();
+				return 'GLOB ' . $this->quote_sqlite_value( $helper->_helper_like_to_glob_pattern( $pattern_value ) ) . ' COLLATE BINARY';
+			}
+
+			return sprintf( 'GLOB _helper_like_to_glob_pattern(%s)', $pattern );
 		}
 
 		/*
@@ -4545,6 +4573,13 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * @throws WP_SQLite_Driver_Exception When the translation fails.
 	 */
 	private function translate_regexp_functions( WP_Parser_Node $node ): string {
+		if ( ! $this->supports_udfs ) {
+			// The REGEXP operator requires the "regexp()" user-defined function.
+			throw $this->new_not_supported_exception(
+				'REGEXP (the connection does not support user-defined functions)'
+			);
+		}
+
 		$tokens    = $node->get_descendant_tokens();
 		$is_binary = isset( $tokens[1] ) && WP_MySQL_Lexer::BINARY_SYMBOL === $tokens[1]->id;
 
@@ -4658,6 +4693,11 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				if ( 0 === count( $args ) ) {
 					return '((RANDOM() & ((1 << 53) - 1)) / ((1 << 53) * 1.0))';
 				}
+				if ( ! $this->supports_udfs ) {
+					throw $this->new_not_supported_exception(
+						'RAND(N) with a seed (the connection does not support user-defined functions)'
+					);
+				}
 				return $this->translate_sequence( $node->get_children() );
 			case 'DATE_FORMAT':
 				list ( $date, $mysql_format ) = $args;
@@ -4731,8 +4771,283 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				);
 				return $this->quote_sqlite_value( $value );
 			default:
+				if ( ! $this->supports_udfs ) {
+					$rewritten = $this->translate_function_call_without_udfs( $name, $args );
+					if ( null !== $rewritten ) {
+						return $rewritten;
+					}
+				}
 				return $this->translate_sequence( $node->get_children() );
 		}
+	}
+
+	/**
+	 * Translate a MySQL function that is normally emulated with a user-defined
+	 * SQL function to a plain SQLite expression.
+	 *
+	 * This is used for connections without user-defined function support,
+	 * such as remote SQLite databases (e.g. Cloudflare D1), where PHP
+	 * callbacks cannot run inside the database. Some functions can only be
+	 * rewritten when their arguments are constant string literals; these
+	 * are then evaluated in PHP at translation time.
+	 *
+	 * @param  string   $name The uppercase MySQL function name.
+	 * @param  string[] $args The translated SQLite argument expressions.
+	 * @return string|null    The rewritten SQLite expression, or null when
+	 *                        the function is not emulated with a UDF and
+	 *                        should be passed through unchanged.
+	 * @throws WP_SQLite_Driver_Exception When the function cannot be used
+	 *                                    without user-defined functions.
+	 */
+	private function translate_function_call_without_udfs( string $name, array $args ): ?string {
+		switch ( $name ) {
+			case 'MONTH':
+			case 'MONTHNUM':
+				return sprintf( "CAST(STRFTIME('%%m', %s) AS INTEGER)", $args[0] );
+			case 'YEAR':
+				return sprintf( "CAST(STRFTIME('%%Y', %s) AS INTEGER)", $args[0] );
+			case 'DAY':
+			case 'DAYOFMONTH':
+				return sprintf( "CAST(STRFTIME('%%d', %s) AS INTEGER)", $args[0] );
+			case 'HOUR':
+				return sprintf( "CAST(STRFTIME('%%H', %s) AS INTEGER)", $args[0] );
+			case 'MINUTE':
+				return sprintf( "CAST(STRFTIME('%%M', %s) AS INTEGER)", $args[0] );
+			case 'SECOND':
+				return sprintf( "CAST(STRFTIME('%%S', %s) AS INTEGER)", $args[0] );
+			case 'DAYOFWEEK':
+				// MySQL: 1 = Sunday. SQLite "%w": 0 = Sunday.
+				return sprintf( "(CAST(STRFTIME('%%w', %s) AS INTEGER) + 1)", $args[0] );
+			case 'WEEKDAY':
+				// MySQL: 0 = Monday. SQLite "%w": 0 = Sunday.
+				return sprintf( "((CAST(STRFTIME('%%w', %s) AS INTEGER) + 6) %% 7)", $args[0] );
+			case 'WEEK':
+				/*
+				 * Mode 0 (weeks starting on Sunday) maps to the SQLite "%U"
+				 * week number. Mode 1 (weeks starting on Monday, week 1 is
+				 * the first week with 4+ days in the year) matches the ISO
+				 * "%V" week number, except that early-January days belonging
+				 * to the last week of the previous year yield the previous
+				 * year's week number rather than MySQL's 0.
+				 */
+				$mode = $args[1] ?? '0';
+				if ( '0' === $mode ) {
+					return sprintf( "CAST(STRFTIME('%%U', %s) AS INTEGER)", $args[0] );
+				}
+				if ( '1' === $mode ) {
+					return sprintf( "CAST(STRFTIME('%%V', %s) AS INTEGER)", $args[0] );
+				}
+				throw $this->new_not_supported_exception(
+					'WEEK() with a mode other than 0 or 1 (the connection does not support user-defined functions)'
+				);
+			case 'UNIX_TIMESTAMP':
+				if ( 0 === count( $args ) ) {
+					return "UNIXEPOCH('now')";
+				}
+				return sprintf( 'UNIXEPOCH(%s)', $args[0] );
+			case 'FROM_UNIXTIME':
+				if ( 1 === count( $args ) ) {
+					return sprintf( "DATETIME(%s, 'unixepoch')", $args[0] );
+				}
+				$format = $this->get_string_literal_value( $args[1] );
+				if ( null !== $format ) {
+					$format = $this->convert_mysql_date_format_to_strftime( $format );
+				}
+				if ( null === $format ) {
+					throw $this->new_not_supported_exception(
+						'FROM_UNIXTIME() with a non-constant or unsupported format (the connection does not support user-defined functions)'
+					);
+				}
+				return sprintf(
+					"STRFTIME(%s, %s, 'unixepoch')",
+					$this->quote_sqlite_value( $format ),
+					$args[0]
+				);
+			case 'NOW':
+			case 'LOCALTIME':
+			case 'LOCALTIMESTAMP':
+			case 'UTC_TIMESTAMP':
+				return "DATETIME('now')";
+			case 'CURDATE':
+			case 'UTC_DATE':
+				return "DATE('now')";
+			case 'UTC_TIME':
+				return "TIME('now')";
+			case 'ISNULL':
+				return sprintf( '(%s IS NULL)', $args[0] );
+			case 'IF':
+				return sprintf( 'IIF(%s, %s, %s)', $args[0], $args[1], $args[2] );
+			case 'FIELD':
+				$fragment = sprintf( 'CASE %s', $args[0] );
+				for ( $i = 1; $i < count( $args ); $i++ ) {
+					$fragment .= sprintf( ' WHEN %s THEN %d', $args[ $i ], $i );
+				}
+				return $fragment . ' ELSE 0 END';
+			case 'LEAST':
+				return 'MIN(' . implode( ', ', $args ) . ')';
+			case 'GREATEST':
+				return 'MAX(' . implode( ', ', $args ) . ')';
+			case 'LOCATE':
+				if ( 2 === count( $args ) ) {
+					return sprintf( 'INSTR(%s, %s)', $args[1], $args[0] );
+				}
+				return sprintf(
+					'IIF(INSTR(SUBSTR(%2$s, %3$s), %1$s) = 0, 0, INSTR(SUBSTR(%2$s, %3$s), %1$s) + %3$s - 1)',
+					$args[0],
+					$args[1],
+					$args[2]
+				);
+			case 'LOG':
+				if ( 1 === count( $args ) ) {
+					return sprintf( 'LN(%s)', $args[0] );
+				}
+				return sprintf( '(LN(%s) / LN(%s))', $args[1], $args[0] );
+			case 'DATEDIFF':
+				return sprintf(
+					'CAST(JULIANDAY(DATE(%s)) - JULIANDAY(DATE(%s)) AS INTEGER)',
+					$args[0],
+					$args[1]
+				);
+			case 'UCASE':
+				return sprintf( 'UPPER(%s)', $args[0] );
+			case 'LCASE':
+				return sprintf( 'LOWER(%s)', $args[0] );
+			case 'UNHEX':
+				// A native SQLite function since 3.41.0.
+				return 'UNHEX(' . implode( ', ', $args ) . ')';
+			case 'INET_NTOA':
+				return sprintf(
+					"PRINTF('%%d.%%d.%%d.%%d', (%1\$s >> 24) & 255, (%1\$s >> 16) & 255, (%1\$s >> 8) & 255, %1\$s & 255)",
+					$args[0]
+				);
+			case 'GET_LOCK':
+			case 'RELEASE_LOCK':
+				// Advisory locks are meaningless on a single-writer database.
+				return '1';
+			case 'MD5':
+			case 'REVERSE':
+			case 'TO_BASE64':
+			case 'FROM_BASE64':
+			case 'INET_ATON':
+				// These can be evaluated in PHP for constant arguments.
+				$value = $this->get_string_literal_value( $args[0] );
+				if ( null === $value ) {
+					throw $this->new_not_supported_exception(
+						sprintf(
+							'%s() with a non-constant argument (the connection does not support user-defined functions)',
+							$name
+						)
+					);
+				}
+				switch ( $name ) {
+					case 'MD5':
+						$result = md5( $value );
+						break;
+					case 'REVERSE':
+						$result = strrev( $value );
+						break;
+					case 'TO_BASE64':
+						$result = base64_encode( $value );
+						break;
+					case 'FROM_BASE64':
+						$result = base64_decode( $value );
+						break;
+					default:
+						$result = (string) ip2long( $value );
+						break;
+				}
+				return $this->quote_sqlite_value( $result );
+			case 'REGEXP':
+			case 'RLIKE':
+				throw $this->new_not_supported_exception(
+					'REGEXP (the connection does not support user-defined functions)'
+				);
+		}
+		return null;
+	}
+
+	/**
+	 * Convert a MySQL date format to an SQLite STRFTIME format.
+	 *
+	 * @param  string $format The MySQL date format.
+	 * @return string|null    The STRFTIME format, or null when the format
+	 *                        includes unsupported format specifiers.
+	 */
+	private function convert_mysql_date_format_to_strftime( string $format ): ?string {
+		$map = array(
+			'%Y' => '%Y', // Year, four digits.
+			'%m' => '%m', // Month, two digits.
+			'%c' => '%m', // Month (MySQL: without zero padding).
+			'%d' => '%d', // Day of the month, two digits.
+			'%e' => '%e', // Day of the month, without zero padding.
+			'%H' => '%H', // Hour (00-23).
+			'%k' => '%k', // Hour (0-23).
+			'%h' => '%I', // Hour (01-12).
+			'%I' => '%I', // Hour (01-12).
+			'%l' => '%l', // Hour (1-12).
+			'%i' => '%M', // Minutes, two digits.
+			'%S' => '%S', // Seconds, two digits.
+			'%s' => '%S', // Seconds, two digits.
+			'%p' => '%p', // AM or PM.
+			'%j' => '%j', // Day of the year, three digits.
+			'%w' => '%w', // Day of the week (0 = Sunday).
+			'%T' => '%H:%M:%S',
+			'%%' => '%%',
+		);
+
+		$result = '';
+		$length = strlen( $format );
+		for ( $i = 0; $i < $length; $i++ ) {
+			if ( '%' !== $format[ $i ] ) {
+				$result .= $format[ $i ];
+				continue;
+			}
+			$token = substr( $format, $i, 2 );
+			if ( ! isset( $map[ $token ] ) ) {
+				return null;
+			}
+			$result .= $map[ $token ];
+			$i      += 1;
+		}
+		return $result;
+	}
+
+	/**
+	 * Extract the value of a translated SQLite string literal expression.
+	 *
+	 * @param  string $expression The translated SQLite expression.
+	 * @return string|null        The string value, or null when the
+	 *                            expression is not a plain string literal.
+	 */
+	private function get_string_literal_value( string $expression ): ?string {
+		if ( 1 === preg_match( "/^'((?:[^']|'')*)'$/", $expression, $matches ) ) {
+			return str_replace( "''", "'", $matches[1] );
+		}
+		return null;
+	}
+
+	/**
+	 * Compose an SQLite expression that raises an error when evaluated.
+	 *
+	 * This is used for strict mode data validation, where invalid values
+	 * must reject the whole statement at execution time.
+	 *
+	 * With user-defined function support, the "THROW" function raises an
+	 * error with the exact message. Without it, a malformed JSON error is
+	 * raised instead: the message expression is embedded in an invalid
+	 * JSON document passed to JSON_EXTRACT(). Referencing the message
+	 * expression (which involves column values) keeps the expression
+	 * non-constant, so SQLite evaluates it only in the failing branch.
+	 * The exact error message fidelity is lost on such connections.
+	 *
+	 * @param  string $message_expression An SQLite expression composing the error message.
+	 * @return string                     An SQLite expression raising an error when evaluated.
+	 */
+	private function compose_error_expression( string $message_expression ): string {
+		if ( $this->supports_udfs ) {
+			return sprintf( 'THROW(%s)', $message_expression );
+		}
+		return sprintf( "JSON_EXTRACT('[' || (%s), '$')", $message_expression );
 	}
 
 	/**
@@ -6094,7 +6409,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 							FROM (SELECT CAST(%s AS INTEGER) AS value)
 						)",
 						$is_strict_mode
-							? sprintf( "THROW('Out of range value: ''' || %s || '''')", $translated_value )
+							? $this->compose_error_expression( sprintf( "'Out of range value: ''' || %s || ''''", $translated_value ) )
 							: "'0000'",
 						$translated_value
 					);
@@ -6103,10 +6418,12 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				// In strict mode, invalid date/time values are rejected.
 				// In non-strict mode, they get an IMPLICIT DEFAULT value.
 				if ( $is_strict_mode ) {
-					$fallback = sprintf(
-						"THROW('Incorrect %s value: ''' || %s || '''')",
-						$mysql_data_type,
-						$translated_value
+					$fallback = $this->compose_error_expression(
+						sprintf(
+							"'Incorrect %s value: ''' || %s || ''''",
+							$mysql_data_type,
+							$translated_value
+						)
 					);
 				} else {
 					$implicit_default = self::DATA_TYPE_IMPLICIT_DEFAULT_MAP[ $mysql_data_type ] ?? null;
