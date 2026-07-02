@@ -132,12 +132,15 @@ class WP_SQLite_Information_Schema_Reconstructor {
 				AND name != ?
 				AND name NOT LIKE ? ESCAPE '\'
 				AND name NOT LIKE ? ESCAPE '\'
+				AND name NOT LIKE ? ESCAPE '\'
 				ORDER BY name
 			",
 			array(
 				'_mysql_data_types_cache',
 				'sqlite\_%',
 				str_replace( '_', '\_', WP_PDO_MySQL_On_SQLite::RESERVED_PREFIX ) . '%',
+				// Cloudflare D1 internal tables (e.g. "_cf_METADATA", "_cf_KV").
+				'\_cf\_%',
 			)
 		)->fetchAll( PDO::FETCH_COLUMN );
 	}

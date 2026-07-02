@@ -348,12 +348,23 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * Get the SQLite version of the remote D1 database.
 	 *
+	 * The D1 authorizer may not permit calling "sqlite_version()". In that
+	 * case, a conservative default is assumed — D1 runs recent SQLite
+	 * versions well above the driver's requirements.
+	 *
 	 * @return string The SQLite engine version, e.g. "3.45.1".
 	 */
 	public function get_server_version(): string {
 		if ( null === $this->server_version ) {
-			$result               = $this->transport->query( 'SELECT sqlite_version()' );
-			$this->server_version = (string) ( $result['rows'][0][0] ?? '' );
+			try {
+				$result               = $this->transport->query( 'SELECT sqlite_version()' );
+				$this->server_version = (string) ( $result['rows'][0][0] ?? '' );
+			} catch ( WP_SQLite_D1_Exception $e ) {
+				$this->server_version = '';
+			}
+			if ( '' === $this->server_version ) {
+				$this->server_version = '3.45.0';
+			}
 		}
 		return $this->server_version;
 	}

@@ -13,6 +13,7 @@ require_once __DIR__ . '/interface-wp-sqlite-d1-transport.php';
 require_once __DIR__ . '/class-wp-sqlite-d1-exception.php';
 require_once __DIR__ . '/class-wp-sqlite-d1-response.php';
 require_once __DIR__ . '/class-wp-sqlite-d1-connection.php';
+require_once __DIR__ . '/trait-wp-sqlite-d1-protocol.php';
 require_once __DIR__ . '/class-wp-sqlite-d1-http-transport.php';
 
 /*
