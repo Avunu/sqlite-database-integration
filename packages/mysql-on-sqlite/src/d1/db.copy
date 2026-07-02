@@ -1,0 +1,148 @@
+<?php
+/**
+ * Plugin Name: Cloudflare D1 integration (Drop-in)
+ * Version: 1.0.0
+ *
+ * A "wp-content/db.php" drop-in connecting WordPress to a Cloudflare D1
+ * database through the MySQL-on-SQLite driver and the D1 proxy worker.
+ *
+ * This drop-in uses the SQLite Database Integration plugin's driver, but
+ * replaces the local SQLite connection with a remote D1 connection. Copy
+ * this file to "wp-content/db.php" and configure the constants below.
+ *
+ * Configuration (as wp-config.php constants or environment variables):
+ *
+ *   WP_D1_PROXY_URL            Required. The base URL of the D1 proxy,
+ *                              e.g. "http://d1.internal" for a Cloudflare
+ *                              Containers outbound handler, or the URL of
+ *                              a standalone proxy worker deployment.
+ *   WP_D1_PROXY_TOKEN          The bearer token of a standalone proxy.
+ *   WP_D1_SCHEMA_CACHE         Whether to cache schema information reads
+ *                              within a request. Default: true.
+ *   WP_D1_HTTP_TIMEOUT_MS      The HTTP request timeout. Default: 30000.
+ *   WP_D1_TRANSACTION_FALLBACK How to handle transactional statements,
+ *                              which D1 does not support: "warn" (default),
+ *                              "error", or "ignore".
+ *
+ * @package wp-sqlite-integration
+ */
+
+define( 'D1_DB_DROPIN_VERSION', '1.0.0' );
+
+// Tweak to allow copy-pasting the file without having to run string-replacements.
+$sqlite_plugin_implementation_folder_path = '{SQLITE_IMPLEMENTATION_FOLDER_PATH}';
+if ( ! file_exists( $sqlite_plugin_implementation_folder_path ) ) { // Check that the folder exists.
+	$sqlite_plugin_implementation_folder_path = realpath( __DIR__ . '/plugins/sqlite-database-integration' );
+}
+
+// Bail early if the SQLite implementation was not located in the plugin.
+if ( ! $sqlite_plugin_implementation_folder_path || ! file_exists( $sqlite_plugin_implementation_folder_path . '/wp-includes/database/d1/load.php' ) ) {
+	return;
+}
+
+/**
+ * Read a configuration value from a constant or an environment variable.
+ *
+ * @param  string $name    The constant and environment variable name.
+ * @param  mixed  $default The default value.
+ * @return mixed           The configuration value.
+ */
+function wp_sqlite_d1_config( string $name, $default = null ) {
+	if ( defined( $name ) ) {
+		return constant( $name );
+	}
+	$value = getenv( $name );
+	if ( false !== $value ) {
+		return $value;
+	}
+	return $default;
+}
+
+// Bail early if the D1 proxy URL is not configured. WordPress then falls
+// back to the default MySQL database connection.
+if ( ! wp_sqlite_d1_config( 'WP_D1_PROXY_URL' ) ) {
+	return;
+}
+
+// Define the database engine constants.
+if ( ! defined( 'DATABASE_TYPE' ) ) {
+	define( 'DATABASE_TYPE', 'd1' );
+}
+if ( ! defined( 'DB_ENGINE' ) ) {
+	define( 'DB_ENGINE', 'd1' );
+}
+
+// Require the driver and the D1 backend from the plugin.
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/version.php';
+require_once $sqlite_plugin_implementation_folder_path . '/constants.php';
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/load.php';
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/d1/load.php';
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/class-wp-sqlite-db.php';
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/install-functions.php';
+
+/**
+ * A WordPress database access class connecting to Cloudflare D1.
+ *
+ * This replaces the local SQLite connection of WP_SQLite_DB with a remote
+ * D1 connection; everything else about the MySQL-on-SQLite driver applies
+ * unchanged.
+ */
+class WP_D1_DB extends WP_SQLite_DB {
+	/**
+	 * Connect to the D1 database.
+	 *
+	 * @see WP_SQLite_DB::db_connect()
+	 *
+	 * @param bool $allow_bail Not used.
+	 * @return void
+	 */
+	public function db_connect( $allow_bail = true ) {
+		if ( $this->dbh ) {
+			return;
+		}
+		$this->init_charset();
+
+		if ( null === $this->dbname || '' === $this->dbname ) {
+			$this->bail(
+				'The database name was not set. The SQLite driver requires a database name to be set to emulate MySQL information schema tables.',
+				'db_connect_fail'
+			);
+			return false;
+		}
+
+		try {
+			$transport = wp_sqlite_d1_create_transport(
+				(string) wp_sqlite_d1_config( 'WP_D1_PROXY_URL' ),
+				wp_sqlite_d1_config( 'WP_D1_PROXY_TOKEN' ),
+				array(
+					'timeout_ms' => (int) wp_sqlite_d1_config( 'WP_D1_HTTP_TIMEOUT_MS', 30000 ),
+				)
+			);
+
+			$connection = new WP_SQLite_D1_Connection(
+				$transport,
+				array(
+					'schema_cache' => filter_var( wp_sqlite_d1_config( 'WP_D1_SCHEMA_CACHE', true ), FILTER_VALIDATE_BOOLEAN ),
+				)
+			);
+
+			$this->dbh = new WP_SQLite_Driver(
+				$connection,
+				$this->dbname,
+				80038,
+				array(
+					'transaction_fallback' => (string) wp_sqlite_d1_config( 'WP_D1_TRANSACTION_FALLBACK', 'warn' ),
+				)
+			);
+		} catch ( Throwable $e ) {
+			$this->last_error = 'Failed to connect to the D1 database: ' . $e->getMessage();
+		}
+		if ( $this->last_error ) {
+			return false;
+		}
+		$this->ready = true;
+		$this->set_sql_mode();
+	}
+}
+
+$GLOBALS['wpdb'] = new WP_D1_DB( defined( 'DB_NAME' ) ? DB_NAME : '' );
