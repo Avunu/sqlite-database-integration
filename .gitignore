@@ -10,3 +10,5 @@ composer.lock
 /.claude/settings.local.json
 /.adversarial-loop/
 /packages/php-ext-wp-mysql-parser/target/
+/packages/d1-proxy-worker/node_modules/
+/packages/d1-proxy-worker/.wrangler/

@@ -1,0 +1,25 @@
+# Standalone deployment of the D1 proxy worker.
+#
+# This configuration is used for local development (`wrangler dev` runs the
+# worker against a local D1 database, no Cloudflare credentials needed) and
+# as a template for standalone deployments.
+#
+# For production, set the D1 "database_id" below, and provision the shared
+# secret with: wrangler secret put WP_D1_PROXY_TOKEN
+
+name = "wp-d1-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "wordpress"
+database_id = "00000000-0000-0000-0000-000000000000" # Replace for deployment; ignored by local dev.
+
+[vars]
+# The maximum number of statements accepted in one /v1/batch request.
+WP_D1_PROXY_MAX_BATCH_STATEMENTS = "100"
+
+# DANGER: Allows unauthenticated access when WP_D1_PROXY_TOKEN is not set.
+# This is intended ONLY for local development. Remove for deployments.
+WP_D1_PROXY_ALLOW_INSECURE = "true"
