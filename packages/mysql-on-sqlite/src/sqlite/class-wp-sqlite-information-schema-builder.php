@@ -392,7 +392,7 @@ class WP_SQLite_Information_Schema_Builder {
 	 * database. Tables that are missing will be created.
 	 */
 	public function ensure_information_schema_tables(): void {
-		$sqlite_version         = $this->connection->get_pdo()->getAttribute( PDO::ATTR_SERVER_VERSION ); // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO
+		$sqlite_version         = $this->connection->get_server_version();
 		$supports_strict_tables = version_compare( $sqlite_version, '3.37.0', '>=' );
 		foreach ( self::INFORMATION_SCHEMA_TABLE_DEFINITIONS as $table_name => $table_body ) {
 			$this->connection->query(
@@ -460,7 +460,7 @@ class WP_SQLite_Information_Schema_Builder {
 	 * the SQLite database. Tables that are missing will be created.
 	 */
 	public function ensure_temporary_information_schema_tables(): void {
-		$sqlite_version         = $this->connection->get_pdo()->getAttribute( PDO::ATTR_SERVER_VERSION ); // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO
+		$sqlite_version         = $this->connection->get_server_version();
 		$supports_strict_tables = version_compare( $sqlite_version, '3.37.0', '>=' );
 		foreach ( self::INFORMATION_SCHEMA_TABLE_DEFINITIONS as $table_name => $table_body ) {
 			// Skip the "schemata" table; MySQL doesn't support temporary databases.

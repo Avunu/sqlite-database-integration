@@ -730,7 +730,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$this->connection->query( 'PRAGMA foreign_keys = ON' );
 
 		// Register SQLite functions.
-		$this->user_defined_functions = WP_SQLite_PDO_User_Defined_Functions::register_for( $this->connection->get_pdo() );
+		$this->user_defined_functions = WP_SQLite_PDO_User_Defined_Functions::register_for( $this->connection );
 
 		// Load MySQL grammar.
 		if ( null === self::$mysql_grammar ) {
@@ -1077,7 +1077,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 * @return string SQLite engine version as a string.
 	 */
 	public function get_sqlite_version(): string {
-		return $this->connection->get_pdo()->getAttribute( PDO::ATTR_SERVER_VERSION );
+		return $this->connection->get_server_version();
 	}
 
 	/**
