@@ -341,7 +341,7 @@ class WP_SQLite_Information_Schema_Builder {
 	/**
 	 * An instance of the SQLite connection.
 	 *
-	 * @var WP_SQLite_Connection
+	 * @var WP_SQLite_Connection_Interface
 	 */
 	private $connection;
 
@@ -349,9 +349,9 @@ class WP_SQLite_Information_Schema_Builder {
 	 * Constructor.
 	 *
 	 * @param string               $reserved_prefix An identifier prefix for internal database objects.
-	 * @param WP_SQLite_Connection $connection      An instance of the SQLite connection.
+	 * @param WP_SQLite_Connection_Interface $connection An instance of the SQLite connection.
 	 */
-	public function __construct( string $reserved_prefix, WP_SQLite_Connection $connection ) {
+	public function __construct( string $reserved_prefix, WP_SQLite_Connection_Interface $connection ) {
 		$this->connection             = $connection;
 		$this->table_prefix           = $reserved_prefix . 'mysql_information_schema_';
 		$this->temporary_table_prefix = $reserved_prefix . 'mysql_information_schema_tmp_';

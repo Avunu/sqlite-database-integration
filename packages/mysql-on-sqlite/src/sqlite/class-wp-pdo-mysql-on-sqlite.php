@@ -439,7 +439,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	/**
 	 * An instance of the SQLite connection.
 	 *
-	 * @var WP_SQLite_Connection
+	 * @var WP_SQLite_Connection_Interface
 	 */
 	private $connection;
 
@@ -605,8 +605,20 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 *
 	 * Set up an SQLite connection and the MySQL-on-SQLite driver.
 	 *
-	 * @param WP_SQLite_Connection $connection A SQLite database connection.
-	 * @param string               $db_name    The database name.
+	 * In addition to the standard PDO constructor arguments, the following
+	 * driver-specific values can be passed using the "$options" argument:
+	 *
+	 *   - "connection"    A WP_SQLite_Connection_Interface instance to use.
+	 *                     When provided, the "pdo" option is ignored.
+	 *   - "pdo"           A PDO instance with an SQLite connection to use.
+	 *   - "mysql_version" The emulated MySQL version. Default: 80038.
+	 *   - "journal_mode"  The SQLite journal mode (for new connections).
+	 *   - "synchronous"   The SQLite synchronous setting (for new connections).
+	 *
+	 * @param string      $dsn      The Data Source Name, e.g. "mysql-on-sqlite:dbname=wp;path=/path/to/db.sqlite".
+	 * @param string|null $username Unused. A PDO API compatibility argument.
+	 * @param string|null $password Unused. A PDO API compatibility argument.
+	 * @param array       $options  Driver options. See the description above.
 	 *
 	 * @throws WP_SQLite_Driver_Exception When the driver initialization fails.
 	 */
@@ -655,17 +667,24 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		$path    = $args['path'] ?? ':memory:';
 		$db_name = $args['dbname'] ?? 'sqlite_database';
 
-		// Create a new SQLite connection.
-		$connection_options = array(
-			'journal_mode' => $options['journal_mode'] ?? null,
-			'synchronous'  => $options['synchronous'] ?? null,
-		);
-		if ( isset( $options['pdo'] ) ) {
-			$connection_options['pdo'] = $options['pdo'];
+		// Use the provided SQLite connection, or create a new one.
+		if (
+			isset( $options['connection'] )
+			&& $options['connection'] instanceof WP_SQLite_Connection_Interface
+		) {
+			$this->connection = $options['connection'];
 		} else {
-			$connection_options['path'] = $path;
+			$connection_options = array(
+				'journal_mode' => $options['journal_mode'] ?? null,
+				'synchronous'  => $options['synchronous'] ?? null,
+			);
+			if ( isset( $options['pdo'] ) ) {
+				$connection_options['pdo'] = $options['pdo'];
+			} else {
+				$connection_options['path'] = $path;
+			}
+			$this->connection = new WP_SQLite_Connection( $connection_options );
 		}
-		$this->connection = new WP_SQLite_Connection( $connection_options );
 
 		$this->mysql_version = $options['mysql_version'] ?? 80038;
 		$this->main_db_name  = $db_name;
@@ -1065,9 +1084,9 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	/**
 	 * Get the SQLite connection instance.
 	 *
-	 * @return WP_SQLite_Connection
+	 * @return WP_SQLite_Connection_Interface
 	 */
-	public function get_connection(): WP_SQLite_Connection {
+	public function get_connection(): WP_SQLite_Connection_Interface {
 		return $this->connection;
 	}
 

@@ -54,13 +54,13 @@ class WP_SQLite_Driver {
 	 *
 	 * Set up an SQLite connection and the MySQL-on-SQLite driver.
 	 *
-	 * @param WP_SQLite_Connection $connection A SQLite database connection.
-	 * @param string               $database   The database name.
+	 * @param WP_SQLite_Connection_Interface $connection A SQLite database connection.
+	 * @param string                         $database   The database name.
 	 *
 	 * @throws WP_SQLite_Driver_Exception When the driver initialization fails.
 	 */
 	public function __construct(
-		WP_SQLite_Connection $connection,
+		WP_SQLite_Connection_Interface $connection,
 		string $database,
 		int $mysql_version = 80038
 	) {
@@ -70,7 +70,7 @@ class WP_SQLite_Driver {
 			null,
 			array(
 				'mysql_version' => $mysql_version,
-				'pdo'           => $connection->get_pdo(),
+				'connection'    => $connection,
 			)
 		);
 		$this->main_db_name           = $database;
@@ -82,9 +82,9 @@ class WP_SQLite_Driver {
 	/**
 	 * Get the SQLite connection instance.
 	 *
-	 * @return WP_SQLite_Connection
+	 * @return WP_SQLite_Connection_Interface
 	 */
-	public function get_connection(): WP_SQLite_Connection {
+	public function get_connection(): WP_SQLite_Connection_Interface {
 		return $this->mysql_on_sqlite_driver->get_connection();
 	}
 

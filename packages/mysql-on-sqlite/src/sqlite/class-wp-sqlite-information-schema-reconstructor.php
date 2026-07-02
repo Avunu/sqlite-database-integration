@@ -26,7 +26,7 @@ class WP_SQLite_Information_Schema_Reconstructor {
 	/**
 	 * An instance of the SQLite connection.
 	 *
-	 * @var WP_SQLite_Connection
+	 * @var WP_SQLite_Connection_Interface
 	 */
 	private $connection;
 
