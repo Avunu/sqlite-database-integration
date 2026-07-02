@@ -1,0 +1,56 @@
+name: Upstream Merge Check
+
+# Early warning for upstream drift: attempt to merge the WordPress upstream
+# trunk into this branch and run the test suites on the merged tree. Nothing
+# is pushed; a failure means the next real merge needs manual attention.
+
+on:
+  schedule:
+    - cron: '20 5 * * 1,4' # Mondays and Thursdays at 05:20 UTC.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  merge-and-test:
+    name: Merge upstream trunk and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream trunk
+        run: |
+          git config user.name 'upstream-merge-check'
+          git config user.email 'upstream-merge-check@invalid'
+          git remote add upstream https://github.com/WordPress/sqlite-database-integration.git
+          git fetch upstream trunk
+          git merge --no-edit upstream/trunk
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo, pdo_sqlite, curl
+          coverage: none
+
+      - name: Install dependencies
+        working-directory: packages/mysql-on-sqlite
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run the test suite (default backend)
+        working-directory: packages/mysql-on-sqlite
+        run: composer run test
+
+      - name: Run the driver suites against the D1 backend
+        working-directory: packages/mysql-on-sqlite
+        env:
+          WP_SQLITE_TEST_BACKEND: d1
+        run: ./vendor/bin/phpunit tests/WP_SQLite_Driver_Tests.php tests/WP_SQLite_Driver_Query_Tests.php tests/WP_SQLite_Driver_Metadata_Tests.php tests/WP_PDO_MySQL_On_SQLite_PDO_API_Tests.php

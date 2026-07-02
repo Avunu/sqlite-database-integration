@@ -1,0 +1,161 @@
+name: D1 Backend Tests
+
+on:
+  push:
+    branches:
+      - trunk
+      - d1-support
+    paths:
+      - '.github/workflows/d1-backend-tests.yml'
+      - 'packages/mysql-on-sqlite/**'
+      - 'packages/php-ext-wp-d1-client/**'
+      - 'packages/d1-proxy-worker/**'
+  pull_request:
+    paths:
+      - '.github/workflows/d1-backend-tests.yml'
+      - 'packages/mysql-on-sqlite/**'
+      - 'packages/php-ext-wp-d1-client/**'
+      - 'packages/d1-proxy-worker/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # The D1 proxy worker test suite, running against a real local D1 database
+  # inside workerd. No Cloudflare credentials are needed.
+  proxy-tests:
+    name: D1 proxy worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/d1-proxy-worker/package-lock.json
+
+      - name: Install dependencies
+        working-directory: packages/d1-proxy-worker
+        run: npm ci
+
+      - name: Run tests
+        working-directory: packages/d1-proxy-worker
+        run: npm test
+
+  # The driver test suites running against the D1 connection backend
+  # (over the fake D1 transport; no network access needed).
+  driver-suites:
+    name: Driver suites on D1 backend / PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php: [ '7.2', '8.1', '8.4' ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo, pdo_sqlite, curl
+          coverage: none
+
+      - name: Install dependencies
+        working-directory: packages/mysql-on-sqlite
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run the driver suites against the D1 backend
+        working-directory: packages/mysql-on-sqlite
+        env:
+          WP_SQLITE_TEST_BACKEND: d1
+        run: ./vendor/bin/phpunit tests/WP_SQLite_Driver_Tests.php tests/WP_SQLite_Driver_Query_Tests.php tests/WP_SQLite_Driver_Metadata_Tests.php tests/WP_PDO_MySQL_On_SQLite_PDO_API_Tests.php
+
+  # End-to-end: the D1 transports against a real local D1 database served by
+  # `wrangler dev`, first with the pure-PHP cURL transport, then re-run with
+  # the native Rust client extension loaded (behavior parity check).
+  transport-e2e:
+    name: Transport E2E / PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php: [ '8.1', '8.4' ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/d1-proxy-worker/package-lock.json
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo, pdo_sqlite, curl
+          coverage: none
+
+      - name: Install proxy dependencies
+        working-directory: packages/d1-proxy-worker
+        run: npm ci
+
+      - name: Start the local D1 proxy
+        working-directory: packages/d1-proxy-worker
+        run: |
+          npx wrangler dev --port 8787 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8787/v1/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8787/v1/health
+
+      - name: Install driver dependencies
+        working-directory: packages/mysql-on-sqlite
+        run: composer install --prefer-dist --no-progress
+
+      - name: Smoke test the driver over the cURL transport
+        run: php .github/workflows/d1-transport-smoke.php http://127.0.0.1:8787 curl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # PHP internals differ per version; segregate caches by PHP version so
+      # a rebuild against another PHP ABI doesn't reuse incompatible objects.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/php-ext-wp-d1-client
+          key: php-${{ matrix.php }}
+
+      - name: Lint the extension
+        working-directory: packages/php-ext-wp-d1-client
+        run: cargo fmt --check && cargo clippy --no-deps -- -D warnings
+
+      - name: Build the native client extension
+        working-directory: packages/php-ext-wp-d1-client
+        run: PHP_CONFIG="$(command -v php-config)" cargo build --release
+
+      - name: Verify the native client extension
+        run: |
+          php -d extension="$PWD/packages/php-ext-wp-d1-client/target/release/libwp_d1_client.so" \
+            packages/mysql-on-sqlite/tests/tools/verify-native-d1-client-extension.php
+
+      - name: Smoke test the driver over the native transport
+        run: |
+          php -d extension="$PWD/packages/php-ext-wp-d1-client/target/release/libwp_d1_client.so" \
+            .github/workflows/d1-transport-smoke.php http://127.0.0.1:8787 native
