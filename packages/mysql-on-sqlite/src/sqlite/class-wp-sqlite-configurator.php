@@ -75,7 +75,8 @@ class WP_SQLite_Configurator {
 	public function configure_database(): void {
 		// Use an EXCLUSIVE transaction to prevent multiple connections
 		// from attempting to configure the database at the same time.
-		$this->driver->execute_sqlite_query( 'BEGIN EXCLUSIVE TRANSACTION' );
+		$connection = $this->driver->get_connection();
+		$connection->begin_transaction( 'EXCLUSIVE' );
 		try {
 			$this->ensure_global_variables_table();
 			$this->schema_builder->ensure_information_schema_tables();
@@ -83,10 +84,10 @@ class WP_SQLite_Configurator {
 			$this->save_current_driver_version();
 			$this->ensure_database_data();
 		} catch ( Throwable $e ) {
-			$this->driver->execute_sqlite_query( 'ROLLBACK' );
+			$connection->rollback();
 			throw $e;
 		}
-		$this->driver->execute_sqlite_query( 'COMMIT' );
+		$connection->commit();
 	}
 
 	/**

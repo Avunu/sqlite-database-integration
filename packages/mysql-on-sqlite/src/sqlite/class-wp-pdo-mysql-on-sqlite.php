@@ -540,19 +540,6 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	private $wrapper_transaction_type = null;
 
 	/**
-	 * Whether an SQLite transaction is active in the current session.
-	 *
-	 * This is a polyfill of the "PDO::inTransaction()" method for PHP < 8.4,
-	 * where the "PDO::inTransaction()" method is not reliable with SQLite.
-	 *
-	 * @see https://bugs.php.net/bug.php?id=81227
-	 * @see https://github.com/php/php-src/pull/14268
-	 *
-	 * @var bool
-	 */
-	private $in_transaction = false;
-
-	/**
 	 * Whether a MySQL table lock is active.
 	 *
 	 * Set to "true" when a lock is acquired using the MySQL LOCK statement.
@@ -1042,16 +1029,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 	 */
 	// phpcs:ignore WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid
 	public function inTransaction(): bool {
-		if ( PHP_VERSION_ID < 80400 ) {
-			/*
-			 * On PHP < 8.4, the "PDO::inTransaction()" method is not reliable.
-			 *
-			 * @see https://bugs.php.net/bug.php?id=81227
-			 * @see https://github.com/php/php-src/pull/14268
-			 */
-			return $this->in_transaction;
-		}
-		return $this->connection->get_pdo()->inTransaction();
+		return $this->connection->in_transaction();
 	}
 
 	/**
@@ -1596,23 +1574,15 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 			return;
 		}
 
-		$wrapper_transaction_type = $this->wrapper_transaction_type;
 		if ( $this->inTransaction() ) {
-			$savepoint_name           = $this->get_internal_savepoint_name( 'wrapper' );
-			$stmt                     = $this->connection->prepare( sprintf( 'SAVEPOINT %s', $savepoint_name ) );
-			$wrapper_transaction_type = 'savepoint';
+			$this->connection->savepoint( $this->get_internal_savepoint_name( 'wrapper' ) );
+			$this->wrapper_transaction_type = 'savepoint';
 		} else {
 			// For write transactions, we must use "BEGIN IMMEDIATE".
 			// @see self::begin_user_transaction() method comments.
-			$stmt                     = $this->connection->prepare( $this->is_readonly ? 'BEGIN' : 'BEGIN IMMEDIATE' );
-			$wrapper_transaction_type = 'transaction';
+			$this->connection->begin_transaction( $this->is_readonly ? 'DEFERRED' : 'IMMEDIATE' );
+			$this->wrapper_transaction_type = 'transaction';
 		}
-
-		if ( ! $stmt->execute() ) {
-			throw $this->new_driver_exception( 'Failed to begin wrapper transaction.' );
-		}
-		$this->wrapper_transaction_type = $wrapper_transaction_type;
-		$this->in_transaction           = true;
 	}
 
 	/**
@@ -1623,20 +1593,12 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 			return;
 		}
 
-		$in_transaction = $this->in_transaction;
 		if ( 'savepoint' === $this->wrapper_transaction_type ) {
-			$savepoint_name = $this->get_internal_savepoint_name( 'wrapper' );
-			$stmt           = $this->connection->prepare( sprintf( 'RELEASE SAVEPOINT %s', $savepoint_name ) );
+			$this->connection->release_savepoint( $this->get_internal_savepoint_name( 'wrapper' ) );
 		} else {
-			$stmt           = $this->connection->prepare( 'COMMIT' );
-			$in_transaction = false;
-		}
-
-		if ( ! $stmt->execute() ) {
-			throw $this->new_driver_exception( 'Failed to commit wrapper transaction.' );
+			$this->connection->commit();
 		}
 		$this->wrapper_transaction_type = null;
-		$this->in_transaction           = $in_transaction;
 	}
 
 	/**
@@ -1658,8 +1620,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		 *
 		 * @see self::begin_wrapper_transaction()
 		 */
-		$this->connection->query( 'BEGIN IMMEDIATE' );
-		$this->in_transaction = true;
+		$this->connection->begin_transaction( 'IMMEDIATE' );
 	}
 
 	/**
@@ -1670,8 +1631,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		if ( ! $this->inTransaction() ) {
 			return;
 		}
-		$this->connection->query( 'COMMIT' );
-		$this->in_transaction = false;
+		$this->connection->commit();
 	}
 
 	/**
@@ -1682,8 +1642,7 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 		if ( ! $this->inTransaction() ) {
 			return;
 		}
-		$this->connection->query( 'ROLLBACK' );
-		$this->in_transaction = false;
+		$this->connection->rollback();
 	}
 
 	/**
@@ -1719,20 +1678,20 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 					if ( null === $savepoint_name ) {
 						$this->rollback_user_transaction();
 					} else {
-						$this->execute_sqlite_query( sprintf( 'ROLLBACK TO SAVEPOINT %s', $savepoint_name ) );
+						$this->connection->rollback_to_savepoint( $this->unquote_sqlite_identifier( $savepoint_name ) );
 					}
 					return;
 				}
 
 				// SAVEPOINT.
 				if ( WP_MySQL_Lexer::SAVEPOINT_SYMBOL === $token->id ) {
-					$this->execute_sqlite_query( sprintf( 'SAVEPOINT %s', $savepoint_name ) );
+					$this->connection->savepoint( $this->unquote_sqlite_identifier( $savepoint_name ) );
 					return;
 				}
 
 				// RELEASE SAVEPOINT.
 				if ( WP_MySQL_Lexer::RELEASE_SYMBOL === $token->id ) {
-					$this->execute_sqlite_query( sprintf( 'RELEASE SAVEPOINT %s', $savepoint_name ) );
+					$this->connection->release_savepoint( $this->unquote_sqlite_identifier( $savepoint_name ) );
 					return;
 				}
 
