@@ -46,9 +46,14 @@ struct PoolEntry {
 
 /// Get a pooled HTTP client for the given configuration, creating it on
 /// first use in the current process.
-fn pooled_client(timeout_ms: u64, connect_timeout_ms: u64) -> Result<reqwest::blocking::Client, String> {
+fn pooled_client(
+    timeout_ms: u64,
+    connect_timeout_ms: u64,
+) -> Result<reqwest::blocking::Client, String> {
     let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut entries = pool.lock().map_err(|_| "connection pool lock is poisoned".to_string())?;
+    let mut entries = pool
+        .lock()
+        .map_err(|_| "connection pool lock is poisoned".to_string())?;
 
     let pid = process::id();
     let key = PoolKey {
@@ -122,7 +127,8 @@ impl WpSqliteD1NativeClient {
     /// body. Throws on transport failures; HTTP error statuses return the
     /// body normally and are reported by `response_status()`.
     pub fn request(&mut self, path: String, json_body: String) -> PhpResult<String> {
-        let client = pooled_client(self.timeout_ms, self.connect_timeout_ms).map_err(client_error)?;
+        let client =
+            pooled_client(self.timeout_ms, self.connect_timeout_ms).map_err(client_error)?;
 
         let mut request = client
             .post(format!("{}{}", self.endpoint, path))

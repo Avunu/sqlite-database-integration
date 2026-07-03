@@ -194,9 +194,24 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 
 		$is_read = 1 === preg_match( '/^\s*(SELECT|PRAGMA|EXPLAIN|WITH)\b/i', $sql );
 
+		/*
+		 * Collect the column names. On some PHP builds, PDO SQLite fails
+		 * "getColumnMeta()" for statements with an empty result set (see
+		 * the PHP bug #79664 workarounds in the driver). In that case, the
+		 * fake degrades to reporting no column names for empty results —
+		 * unlike a real D1 proxy, which reports them accurately.
+		 */
 		$columns = array();
 		for ( $i = 0; $i < $stmt->columnCount(); $i++ ) {
-			$meta      = $stmt->getColumnMeta( $i );
+			try {
+				$meta = $stmt->getColumnMeta( $i );
+			} catch ( PDOException $e ) {
+				$meta = false;
+			}
+			if ( false === $meta ) {
+				$columns = array();
+				break;
+			}
 			$columns[] = $meta['name'];
 		}
 
