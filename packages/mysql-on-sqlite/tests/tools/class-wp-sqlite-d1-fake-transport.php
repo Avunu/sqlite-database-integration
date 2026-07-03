@@ -53,12 +53,12 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 		$this->pdo->query( 'PRAGMA foreign_keys = ON' );
 
 		// Capture the handle's stringification setting, to restore it after
-		// internal fetches. Reading the attribute requires PHP 8.1+; older
-		// versions assume the tests' backend factory setting (true) for
-		// injected handles.
-		if ( PHP_VERSION_ID >= 80100 ) {
+		// internal fetches. Reading the attribute is not supported on all
+		// PHP versions; those assume the tests' backend factory setting
+		// (true) for injected handles.
+		try {
 			$this->external_stringify = (bool) $this->pdo->getAttribute( PDO::ATTR_STRINGIFY_FETCHES );
-		} else {
+		} catch ( PDOException $e ) {
 			$this->external_stringify = null !== $pdo;
 		}
 	}
@@ -195,11 +195,13 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 		$is_read = 1 === preg_match( '/^\s*(SELECT|PRAGMA|EXPLAIN|WITH)\b/i', $sql );
 
 		/*
-		 * Collect the column names. On some PHP builds, PDO SQLite fails
+		 * Collect the column names. On PHP < 7.3, PDO SQLite fails
 		 * "getColumnMeta()" for statements with an empty result set (see
 		 * the PHP bug #79664 workarounds in the driver). In that case, the
-		 * fake degrades to reporting no column names for empty results —
-		 * unlike a real D1 proxy, which reports them accurately.
+		 * fake degrades to placeholder column names: the result has no
+		 * rows, so the names never surface in data, while the column
+		 * count remains accurate — unlike a real D1 proxy, which reports
+		 * the names accurately.
 		 */
 		$columns = array();
 		for ( $i = 0; $i < $stmt->columnCount(); $i++ ) {
@@ -208,11 +210,7 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 			} catch ( PDOException $e ) {
 				$meta = false;
 			}
-			if ( false === $meta ) {
-				$columns = array();
-				break;
-			}
-			$columns[] = $meta['name'];
+			$columns[] = false === $meta ? "column$i" : $meta['name'];
 		}
 
 		$rows = array();

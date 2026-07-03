@@ -4826,16 +4826,24 @@ class WP_PDO_MySQL_On_SQLite extends PDO {
 				 * Mode 0 (weeks starting on Sunday) maps to the SQLite "%U"
 				 * week number. Mode 1 (weeks starting on Monday, week 1 is
 				 * the first week with 4+ days in the year) matches the ISO
-				 * "%V" week number, except that early-January days belonging
-				 * to the last week of the previous year yield the previous
-				 * year's week number rather than MySQL's 0.
+				 * week number, except in the week spanning the year
+				 * boundary, where MySQL yields 0 (early January) or 53
+				 * (late December) instead of the other year's ISO week
+				 * number. The legacy PHP emulation had the same divergence.
+				 *
+				 * The ISO week is computed from the day-of-year of the
+				 * Thursday in the date's week ("STRFTIME('%V')" would need
+				 * SQLite 3.46+).
 				 */
 				$mode = $args[1] ?? '0';
 				if ( '0' === $mode ) {
 					return sprintf( "CAST(STRFTIME('%%U', %s) AS INTEGER)", $args[0] );
 				}
 				if ( '1' === $mode ) {
-					return sprintf( "CAST(STRFTIME('%%V', %s) AS INTEGER)", $args[0] );
+					return sprintf(
+						"((CAST(STRFTIME('%%j', DATE(%s, '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)",
+						$args[0]
+					);
 				}
 				throw $this->new_not_supported_exception(
 					'WEEK() with a mode other than 0 or 1 (the connection does not support user-defined functions)'
