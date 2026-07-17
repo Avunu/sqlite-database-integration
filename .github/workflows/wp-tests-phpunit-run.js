@@ -17,10 +17,12 @@ const expectedErrors = [
 ];
 
 const expectedFailures = [
-	'Tests_Admin_wpSiteHealth::test_object_cache_thresholds with data set #2',
 	'Tests_Admin_wpSiteHealth::test_object_cache_thresholds with data set #3',
 	'Tests_Comment::test_wp_new_comment_respects_comment_field_lengths',
 	'Tests_Comment::test_wp_update_comment',
+	'Tests_Comment_CheckComment::test_should_return_false_when_comment_previously_approved_is_enabled_and_author_does_not_have_approved_comment',
+	'Tests_Comment_CheckComment::test_should_return_true_when_comment_previously_approved_is_enabled_and_author_has_approved_comment',
+	'Tests_Comment_CheckComment::test_should_return_false_when_comment_previously_approved_is_enabled_and_user_does_not_have_a_previously_approved_comment_with_any_email',
 	'Tests_DB_Charset::test_get_column_charset with data set #0',
 	'Tests_DB_Charset::test_get_column_charset with data set #1',
 	'Tests_DB_Charset::test_get_column_charset with data set #2',
@@ -87,7 +89,6 @@ const expectedFailures = [
 	'Tests_Menu_Walker_Nav_Menu::test_start_el_with_empty_attributes with data set #6',
 	'Tests_Menu_Walker_Nav_Menu::test_start_el_with_empty_attributes with data set #7',
 	'Tests_Menu_wpNavMenu::test_wp_nav_menu_should_not_have_has_children_class_with_custom_depth',
-	'WP_Test_REST_Posts_Controller::test_get_items_orderby_modified_query',
 ];
 
 console.log( 'Running WordPress PHPUnit tests with expected failures tracking...' );

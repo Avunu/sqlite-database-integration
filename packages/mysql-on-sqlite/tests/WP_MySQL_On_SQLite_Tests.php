@@ -2,25 +2,29 @@
 
 use PHPUnit\Framework\TestCase;
 
-class WP_SQLite_Driver_Tests extends TestCase {
-	/** @var WP_SQLite_Driver */
+class WP_MySQL_On_SQLite_Tests extends TestCase {
+	/** @var WP_MySQL_On_SQLite */
 	private $engine;
 
 	/** @var PDO */
 	private $sqlite;
 
+	/** @var mixed */
+	private $last_result;
+
 	// Before each test, we create a new database
 	public function setUp(): void {
 		wp_sqlite_tests_skip_unsupported( $this );
-		$this->engine = wp_sqlite_tests_create_engine( $this->sqlite );
-		$this->engine->query(
+		$this->engine = wp_sqlite_tests_create_pdo_engine( 'mysql-on-sqlite:dbname=wp', $this->sqlite );
+		$this->engine->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
+		$this->query(
 			"CREATE TABLE _options (
 					ID INTEGER PRIMARY KEY AUTO_INCREMENT NOT NULL,
 					option_name TEXT NOT NULL default '',
 					option_value TEXT NOT NULL default ''
 				);"
 		);
-		$this->engine->query(
+		$this->query(
 			"CREATE TABLE _dates (
 					ID INTEGER PRIMARY KEY AUTO_INCREMENT NOT NULL,
 					option_name TEXT NOT NULL default '',
@@ -30,7 +34,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 	}
 
 	private function assertQuery( $sql ) {
-		$retval = $this->engine->query( $sql );
+		$retval = $this->query( $sql );
 		$this->assertNotFalse( $retval );
 		return $retval;
 	}
@@ -38,12 +42,22 @@ class WP_SQLite_Driver_Tests extends TestCase {
 	private function assertQueryError( $sql, $error_message ) {
 		$exception = null;
 		try {
-			$this->engine->query( $sql );
+			$this->query( $sql );
 		} catch ( WP_SQLite_Driver_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception, 'An exception was expected, but none was thrown.' );
 		$this->assertSame( $error_message, $exception->getMessage() );
+	}
+
+	private function query( $sql ) {
+		$statement = $this->engine->query( $sql, PDO::FETCH_OBJ );
+		if ( $statement->columnCount() > 0 ) {
+			$this->last_result = $statement->fetchAll();
+		} else {
+			$this->last_result = $statement->rowCount();
+		}
+		return $this->last_result;
 	}
 
 	public function testRegexp() {
@@ -56,7 +70,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertQuery( "DELETE FROM _options WHERE option_name  REGEXP '^rss_.+$'" );
 		$this->assertQuery( 'SELECT * FROM _options' );
-		$this->assertCount( 1, $this->engine->get_query_results() );
+		$this->assertCount( 1, $this->last_result );
 	}
 
 	/**
@@ -70,7 +84,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "SELECT ID, option_name FROM _options WHERE option_name $operator '$regexp' ORDER BY id LIMIT 1" );
 		$this->assertEquals(
 			array( $expected_result ),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -106,7 +120,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertQuery( 'SELECT YEAR(option_value) as y FROM _dates' );
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( gmdate( 'Y' ), $results[0]->y );
 	}
@@ -123,8 +137,8 @@ class WP_SQLite_Driver_Tests extends TestCase {
 			"UPDATE _dates SET option_value = '2001-05-27 10:08:48' WHERE option_name = 'first' ORDER BY option_name LIMIT 1;"
 		);
 
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first';" );
-		$result2 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='second';" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first';" );
+		$result2 = $this->query( "SELECT option_value FROM _dates WHERE option_name='second';" );
 
 		$this->assertEquals( '2001-05-27 10:08:48', $result1[0]->option_value );
 		$this->assertEquals( '2003-05-28 00:00:45', $result2[0]->option_value );
@@ -132,14 +146,14 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			"UPDATE _dates SET option_value = '2001-05-27 10:08:49' WHERE option_name = 'first';"
 		);
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first';" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first';" );
 		$this->assertEquals( '2001-05-27 10:08:49', $result1[0]->option_value );
 
 		$this->assertQuery(
 			"UPDATE _dates SET option_value = '2001-05-12 10:00:40' WHERE option_name in ( SELECT option_name from _dates );"
 		);
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first';" );
-		$result2 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='second';" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first';" );
+		$result2 = $this->query( "SELECT option_value FROM _dates WHERE option_name='second';" );
 		$this->assertEquals( '2001-05-12 10:00:40', $result1[0]->option_value );
 		$this->assertEquals( '2001-05-12 10:00:40', $result2[0]->option_value );
 	}
@@ -155,10 +169,10 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			"UPDATE _dates SET option_value = '2001-05-27 10:08:48' WHERE option_name = 'first' ORDER BY option_name LIMIT 1"
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
-		$result2 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
+		$result2 = $this->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
 
 		$this->assertEquals( '2001-05-27 10:08:48', $result1[0]->option_value );
 		$this->assertEquals( '2003-05-28 00:00:45', $result2[0]->option_value );
@@ -166,14 +180,14 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			"UPDATE _dates SET option_value = '2001-05-27 10:08:49' WHERE option_name = 'first'"
 		);
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
 		$this->assertEquals( '2001-05-27 10:08:49', $result1[0]->option_value );
 
 		$this->assertQuery(
 			"UPDATE _dates SET option_value = '2001-05-12 10:00:40' WHERE option_name in ( SELECT option_name from _dates )"
 		);
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
-		$result2 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
+		$result2 = $this->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
 		$this->assertEquals( '2001-05-12 10:00:40', $result1[0]->option_value );
 		$this->assertEquals( '2001-05-12 10:00:40', $result2[0]->option_value );
 	}
@@ -193,8 +207,8 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 		$this->assertSame( 2, $return, 'UPDATE query did not return 2 when two row were changed' );
 
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
-		$result2 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
+		$result2 = $this->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
 		$this->assertEquals( '2025-10-29 13:57:21', $result1[0]->option_value );
 		$this->assertEquals( '2025-10-29 13:57:21', $result2[0]->option_value );
 	}
@@ -211,8 +225,8 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 		$this->assertSame( 1, $return, 'UPDATE query did not return 2 when two row were changed' );
 
-		$result1 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
-		$result2 = $this->engine->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
+		$result1 = $this->query( "SELECT option_value FROM _dates WHERE option_name='first'" );
+		$result2 = $this->query( "SELECT option_value FROM _dates WHERE option_name='second'" );
 		$this->assertEquals( '2025-10-29 13:57:21', $result1[0]->option_value );
 		$this->assertEquals( '2003-05-27 10:08:48', $result2[0]->option_value );
 	}
@@ -232,14 +246,14 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$result = $this->assertQuery( "DELETE FROM _dates WHERE option_name LIKE '%' LIMIT 1" );
 		$this->assertSame( 1, $result );
 
-		$rows = $this->engine->query( 'SELECT option_name FROM _dates ORDER BY option_name' );
+		$rows = $this->query( 'SELECT option_name FROM _dates ORDER BY option_name' );
 		$this->assertCount( 2, $rows );
 
 		// ORDER BY + LIMIT: deletes the lexicographically-first remaining row.
 		$result = $this->assertQuery( 'DELETE FROM _dates ORDER BY option_name ASC LIMIT 1' );
 		$this->assertSame( 1, $result );
 
-		$rows = $this->engine->query( 'SELECT option_name FROM _dates' );
+		$rows = $this->query( 'SELECT option_name FROM _dates' );
 		$this->assertCount( 1, $rows );
 		$this->assertSame( 'third', $rows[0]->option_name );
 	}
@@ -255,7 +269,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$result = $this->assertQuery( 'DELETE FROM _dates LIMIT 1' );
 		$this->assertSame( 1, $result );
 
-		$rows = $this->engine->query( 'SELECT option_name FROM _dates' );
+		$rows = $this->query( 'SELECT option_name FROM _dates' );
 		$this->assertCount( 1, $rows );
 	}
 
@@ -270,7 +284,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$result = $this->assertQuery( "DELETE FROM _dates AS d WHERE d.option_name = 'a' LIMIT 1" );
 		$this->assertSame( 1, $result );
 
-		$rows = $this->engine->query( 'SELECT option_name FROM _dates' );
+		$rows = $this->query( 'SELECT option_name FROM _dates' );
 		$this->assertCount( 1, $rows );
 		$this->assertSame( 'b', $rows[0]->option_name );
 	}
@@ -278,7 +292,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 	public function testCastAsBinary() {
 		// Use a confusing alias to make sure it replaces only the correct token
 		$this->assertQuery( "SELECT CAST('ABC' AS BINARY) as `binary`" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 'ABC', $results[0]->binary );
 	}
@@ -341,7 +355,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE _no_such_table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 0, $results );
 	}
 
@@ -359,7 +373,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp_table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			"CREATE TABLE `_tmp_table` (
   `ID` bigint NOT NULL AUTO_INCREMENT,
@@ -387,7 +401,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE `_tmp_table`;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			"CREATE TABLE `_tmp_table` (
   `ID` bigint NOT NULL AUTO_INCREMENT,
@@ -411,7 +425,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp_table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			'CREATE TABLE `_tmp_table` (
   `ID` bigint NOT NULL
@@ -440,7 +454,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp_table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			'CREATE TABLE `_tmp_table` (
   `ID` bigint NOT NULL AUTO_INCREMENT,
@@ -542,7 +556,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp__table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			'CREATE TABLE `_tmp__table` (
   `ID` bigint NOT NULL AUTO_INCREMENT,
@@ -569,7 +583,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp_table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			'CREATE TABLE `_tmp_table` (
   `ID_A` bigint NOT NULL,
@@ -620,7 +634,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp__table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertSame(
 			implode(
 				"\n",
@@ -669,7 +683,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 
 		$this->assertQuery( 'SHOW CREATE TABLE _tmp_bit_defaults;' );
-		$results      = $this->engine->get_query_results();
+		$results      = $this->last_result;
 		$create_table = $results[0]->{'Create Table'};
 		$this->assertStringContainsString( "`quoted_zero` bit(1) DEFAULT b'0'", $create_table );
 		$this->assertStringContainsString( "`integer_five` bit(4) DEFAULT b'101'", $create_table );
@@ -682,7 +696,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertQuery( 'INSERT INTO _tmp_bit_defaults (id) VALUES (1)' );
 		$this->assertQuery( 'SELECT * FROM _tmp_bit_defaults' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -712,7 +726,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( 'INSERT INTO _tmp_bit_defaults (id, maintenance) VALUES (1, 0)' );
 		$this->assertQuery( 'UPDATE _tmp_bit_defaults SET maintenance = DEFAULT' );
 		$this->assertQuery( 'SELECT maintenance FROM _tmp_bit_defaults' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals( array( (object) array( 'maintenance' => '5' ) ), $results );
 	}
 
@@ -893,7 +907,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 					'Tables_in_wp' => '_tmp_table',
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 
 		$this->assertQuery(
@@ -906,7 +920,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 					'Table_type'   => 'BASE TABLE',
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -929,7 +943,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertCount(
 			1,
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -952,7 +966,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertCount(
 			1,
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -982,7 +996,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertCount(
 			2,
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -1020,11 +1034,11 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 		$this->assertCount(
 			2,
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 		$this->assertEquals(
 			'_tmp_table1',
-			$this->engine->get_query_results()[0]->Name
+			$this->last_result[0]->Name
 		);
 	}
 
@@ -1054,11 +1068,11 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 		$this->assertCount(
 			1,
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 		$this->assertEquals(
 			'_tmp_table1',
-			$this->engine->get_query_results()[0]->Name
+			$this->last_result[0]->Name
 		);
 	}
 
@@ -1084,7 +1098,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertSame( 0, $result );
 
 		$this->assertQuery( 'DESCRIBE wptests_users;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -1205,7 +1219,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertSame( 0, $result );
 
 		$this->assertQuery( 'DESCRIBE wptests_users;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -1257,7 +1271,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertSame( 0, $result );
 
 		$this->assertQuery( 'DESCRIBE _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -1284,7 +1298,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertSame( 0, $result );
 
 		$this->assertQuery( 'DESCRIBE _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -1319,7 +1333,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertSame( 0, $result );
 
 		$this->assertQuery( 'DESCRIBE _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -1346,7 +1360,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertSame( 0, $result );
 
 		$this->assertQuery( 'DESCRIBE _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -1373,7 +1387,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertSame( 0, $result );
 
 		$this->assertQuery( 'DESCRIBE _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -1974,7 +1988,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		// Verify that the index was created in the information schema.
 		$this->assertQuery( 'SHOW INDEX FROM _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -2027,7 +2041,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		// Verify that the index was created in the information schema.
 		$this->assertQuery( 'SHOW INDEX FROM _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -2080,7 +2094,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		// Verify that the index was created in the information schema.
 		$this->assertQuery( 'SHOW INDEX FROM _tmp_table;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -2182,7 +2196,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Primary key violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (1, 'Mike', 'Pearseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (1, 'Mike', 'Pearseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
@@ -2191,18 +2205,18 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Unique constraint violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
 		$this->assertStringContainsString( 'UNIQUE constraint failed: _tmp_table.name', $error );
 
 		// Rename the "name" field to "firstname":
-		$result = $this->engine->query( "ALTER TABLE _tmp_table CHANGE column name firstname varchar(50) NOT NULL default 'mark';" );
+		$result = $this->query( "ALTER TABLE _tmp_table CHANGE column name firstname varchar(50) NOT NULL default 'mark';" );
 		$this->assertSame( 0, $result );
 
 		// Confirm the original data is still there:
-		$result = $this->engine->query( 'SELECT * FROM _tmp_table;' );
+		$result = $this->query( 'SELECT * FROM _tmp_table;' );
 		$this->assertCount( 1, $result );
 		$this->assertEquals( 1, $result[0]->ID );
 		$this->assertEquals( 'Johnny', $result[0]->firstname );
@@ -2211,7 +2225,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Confirm the primary key is intact:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (1, 'Mike', 'Pearseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (1, 'Mike', 'Pearseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
@@ -2220,16 +2234,16 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Confirm the unique key is intact:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
 		$this->assertStringContainsString( 'UNIQUE constraint failed: _tmp_table.firstname', $error );
 
 		// Confirm the autoincrement still works:
-		$result = $this->engine->query( "INSERT INTO _tmp_table (firstname, lastname) VALUES ('John', 'Doe');" );
+		$result = $this->query( "INSERT INTO _tmp_table (firstname, lastname) VALUES ('John', 'Doe');" );
 		$this->assertEquals( true, $result );
-		$result = $this->engine->query( "SELECT * FROM _tmp_table WHERE firstname='John';" );
+		$result = $this->query( "SELECT * FROM _tmp_table WHERE firstname='John';" );
 		$this->assertCount( 1, $result );
 		$this->assertEquals( 2, $result[0]->ID );
 	}
@@ -2252,7 +2266,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Primary key violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (1, 'Mike', 'Pearseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (1, 'Mike', 'Pearseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
@@ -2261,18 +2275,18 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Unique constraint violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
 		$this->assertStringContainsString( 'UNIQUE constraint failed: _tmp_table.name', $error );
 
 		// Rename the "name" field to "firstname":
-		$result = $this->engine->query( "ALTER TABLE _tmp_table CHANGE name firstname varchar(50) NOT NULL default 'mark';" );
+		$result = $this->query( "ALTER TABLE _tmp_table CHANGE name firstname varchar(50) NOT NULL default 'mark';" );
 		$this->assertSame( 0, $result );
 
 		// Confirm the original data is still there:
-		$result = $this->engine->query( 'SELECT * FROM _tmp_table;' );
+		$result = $this->query( 'SELECT * FROM _tmp_table;' );
 		$this->assertCount( 1, $result );
 		$this->assertEquals( 1, $result[0]->ID );
 		$this->assertEquals( 'Johnny', $result[0]->firstname );
@@ -2281,7 +2295,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Confirm the primary key is intact:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (1, 'Mike', 'Pearseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (1, 'Mike', 'Pearseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
@@ -2290,16 +2304,16 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Confirm the unique key is intact:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
+			$this->query( "INSERT INTO _tmp_table (ID, firstname, lastname) VALUES (2, 'Johnny', 'Appleseed')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
 		$this->assertStringContainsString( 'UNIQUE constraint failed: _tmp_table.firstname', $error );
 
 		// Confirm the autoincrement still works:
-		$result = $this->engine->query( "INSERT INTO _tmp_table (firstname, lastname) VALUES ('John', 'Doe');" );
+		$result = $this->query( "INSERT INTO _tmp_table (firstname, lastname) VALUES ('John', 'Doe');" );
 		$this->assertEquals( true, $result );
-		$result = $this->engine->query( "SELECT * FROM _tmp_table WHERE firstname='John';" );
+		$result = $this->query( "SELECT * FROM _tmp_table WHERE firstname='John';" );
 		$this->assertCount( 1, $result );
 		$this->assertEquals( 2, $result[0]->ID );
 	}
@@ -2376,7 +2390,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Primary key violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, name) VALUES (1, 'Johnny')" );
+			$this->query( "INSERT INTO _tmp_table (ID, name) VALUES (1, 'Johnny')" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
@@ -2385,25 +2399,25 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Unique constraint violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (5, 'Kate', 'Bar');" );
+			$this->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (5, 'Kate', 'Bar');" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
 		$this->assertStringContainsString( 'UNIQUE constraint failed: _tmp_table.name, _tmp_table.lastname', $error );
 
 		// No constraint violation:
-		$result = $this->engine->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (5, 'Joanna', 'Bar');" );
+		$result = $this->query( "INSERT INTO _tmp_table (ID, name, lastname) VALUES (5, 'Joanna', 'Bar');" );
 		$this->assertEquals( 1, $result );
 
 		// Now – let's change a few columns:
-		$result = $this->engine->query( 'ALTER TABLE _tmp_table CHANGE COLUMN name firstname varchar(20)' );
+		$result = $this->query( 'ALTER TABLE _tmp_table CHANGE COLUMN name firstname varchar(20)' );
 		$this->assertSame( 0, $result );
 
-		$result = $this->engine->query( 'ALTER TABLE _tmp_table CHANGE COLUMN date_as_string datetime datetime NOT NULL' );
+		$result = $this->query( 'ALTER TABLE _tmp_table CHANGE COLUMN date_as_string datetime datetime NOT NULL' );
 		$this->assertSame( 0, $result );
 
 		// Finally, let's confirm our data is intact and the table is still well-behaved:
-		$result = $this->engine->query( 'SELECT * FROM _tmp_table ORDER BY ID;' );
+		$result = $this->query( 'SELECT * FROM _tmp_table ORDER BY ID;' );
 		$this->assertCount( 5, $result );
 		$this->assertEquals( 1, $result[0]->ID );
 		$this->assertEquals( 'Johnny', $result[0]->firstname );
@@ -2413,7 +2427,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Primary key violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, firstname, datetime) VALUES (1, 'Johnny', '2010-01-01 12:53:13');" );
+			$this->query( "INSERT INTO _tmp_table (ID, firstname, datetime) VALUES (1, 'Johnny', '2010-01-01 12:53:13');" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
@@ -2422,19 +2436,19 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		// Unique constraint violation:
 		$error = '';
 		try {
-			$this->engine->query( "INSERT INTO _tmp_table (ID, firstname, lastname, datetime) VALUES (6, 'Kate', 'Bar', '2010-01-01 12:53:13');" );
+			$this->query( "INSERT INTO _tmp_table (ID, firstname, lastname, datetime) VALUES (6, 'Kate', 'Bar', '2010-01-01 12:53:13');" );
 		} catch ( Throwable $e ) {
 			$error = $e->getMessage();
 		}
 		$this->assertStringContainsString( 'UNIQUE constraint failed: _tmp_table.firstname, _tmp_table.lastname', $error );
 
 		// No constraint violation:
-		$result = $this->engine->query( "INSERT INTO _tmp_table (ID, firstname, lastname, datetime) VALUES (6, 'Sophie', 'Bar', '2010-01-01 12:53:13');" );
+		$result = $this->query( "INSERT INTO _tmp_table (ID, firstname, lastname, datetime) VALUES (6, 'Sophie', 'Bar', '2010-01-01 12:53:13');" );
 		$this->assertEquals( 1, $result );
 	}
 
 	public function testCaseInsensitiveUniqueIndex() {
-		$result = $this->engine->query(
+		$result = $this->query(
 			"CREATE TABLE _tmp_table (
 				ID INTEGER PRIMARY KEY AUTO_INCREMENT NOT NULL,
 				name varchar(20) NOT NULL default '',
@@ -2446,10 +2460,10 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 		$this->assertSame( 0, $result );
 
-		$result1 = $this->engine->query( "INSERT INTO _tmp_table (name, lastname) VALUES ('first', 'last');" );
+		$result1 = $this->query( "INSERT INTO _tmp_table (name, lastname) VALUES ('first', 'last');" );
 		$this->assertEquals( 1, $result1 );
 
-		$result1 = $this->engine->query( 'SELECT COUNT(*) num FROM _tmp_table;' );
+		$result1 = $this->query( 'SELECT COUNT(*) num FROM _tmp_table;' );
 		$this->assertEquals( 1, $result1[0]->num );
 
 		// Unique keys should be case-insensitive:
@@ -2463,7 +2477,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		}
 		$this->assertStringContainsString( 'UNIQUE constraint failed', $error );
 
-		$result1 = $this->engine->query( 'SELECT COUNT(*) num FROM _tmp_table;' );
+		$result1 = $this->query( 'SELECT COUNT(*) num FROM _tmp_table;' );
 		$this->assertEquals( 1, $result1[0]->num );
 
 		// Unique keys should be case-insensitive:
@@ -2473,10 +2487,10 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		self::assertEquals( 0, $result1 );
 
-		$result2 = $this->engine->get_query_results();
+		$result2 = $this->last_result;
 		$this->assertEquals( 0, $result2 );
 
-		$result1 = $this->engine->query( 'SELECT COUNT(*)num FROM _tmp_table;' );
+		$result1 = $this->query( 'SELECT COUNT(*)num FROM _tmp_table;' );
 		$this->assertEquals( 1, $result1[0]->num );
 
 		// Unique keys should be case-insensitive:
@@ -2486,7 +2500,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertEquals( 1, $result2 );
 
-		$result1 = $this->engine->query( 'SELECT COUNT(*) num FROM _tmp_table;' );
+		$result1 = $this->query( 'SELECT COUNT(*) num FROM _tmp_table;' );
 		$this->assertEquals( 2, $result1[0]->num );
 	}
 
@@ -2506,7 +2520,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertEquals( 1, $result2 );
 
 		$this->assertQuery( 'SELECT * FROM _tmp_table;' );
-		$this->assertCount( 1, $this->engine->get_query_results() );
+		$this->assertCount( 1, $this->last_result );
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -2514,7 +2528,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 					'ID'   => 1,
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -2525,7 +2539,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_value) VALUES ('2022-31-01 14:24:12');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 2, $results );
 		$this->assertEquals( '2022-01-01 14:24:12', $results[0]->option_value );
 		$this->assertEquals( '0000-00-00 00:00:00', $results[1]->option_value );
@@ -2550,7 +2564,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_value) VALUES ('0000-00-00 00:00:00');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '0000-00-00 00:00:00', $results[0]->option_value );
 	}
@@ -2585,7 +2599,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_value) VALUES ('0000-00-00 00:00:00');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '0000-00-00 00:00:00', $results[0]->option_value );
 	}
@@ -2606,7 +2620,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _date_test (col_date) VALUES ('0000-00-00');" );
 
 		$this->assertQuery( 'SELECT * FROM _date_test;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '0000-00-00', $results[0]->col_date );
 	}
@@ -2637,7 +2651,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_value) VALUES ('2020-00-00 00:00:00');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEquals( '2020-00-15 00:00:00', $results[0]->option_value );
 		$this->assertEquals( '2020-01-00 00:00:00', $results[1]->option_value );
@@ -2671,7 +2685,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_value) VALUES ('2020-00-15 00:00:00');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '0000-00-00 00:00:00', $results[0]->option_value );
 	}
@@ -2687,7 +2701,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_value) VALUES ('2020-01-00 00:00:00');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEquals( '0000-00-00 00:00:00', $results[0]->option_value );
 		$this->assertEquals( '2020-00-15 00:00:00', $results[1]->option_value );
@@ -2702,7 +2716,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_value) VALUES ('2022-01-15 14:30:00');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '2022-01-15 14:30:00', $results[0]->option_value );
 	}
@@ -2717,7 +2731,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "UPDATE _dates SET option_value = '0000-00-00 00:00:00';" );
 
 		$this->assertQuery( 'SELECT * FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '0000-00-00 00:00:00', $results[0]->option_value );
 	}
@@ -2761,13 +2775,13 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		// Zero dates compare as less than real dates.
 		$this->assertQuery( "SELECT option_name FROM _dates WHERE option_value < '2000-01-01 00:00:00' ORDER BY option_value;" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 'zero', $results[0]->option_name );
 
 		// Equality match on zero date.
 		$this->assertQuery( "SELECT option_name FROM _dates WHERE option_value = '0000-00-00 00:00:00';" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 'zero', $results[0]->option_name );
 	}
@@ -2783,7 +2797,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_name, option_value) VALUES ('c', '2023-01-01 00:00:00');" );
 
 		$this->assertQuery( 'SELECT option_name FROM _dates ORDER BY option_value ASC;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEquals( 'a', $results[0]->option_name );
 		$this->assertEquals( 'b', $results[1]->option_name );
@@ -2803,7 +2817,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		// All three rows are readable.
 		$this->assertQuery( 'SELECT option_name, option_value FROM _dates ORDER BY option_value ASC;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEquals( '2020-00-15 00:00:00', $results[0]->option_value );
 		$this->assertEquals( '2020-01-00 00:00:00', $results[1]->option_value );
@@ -2811,7 +2825,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		// Filtering by a zero-in-date value works.
 		$this->assertQuery( "SELECT option_name FROM _dates WHERE option_value = '2020-00-15 00:00:00';" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 'zero-month', $results[0]->option_name );
 	}
@@ -2825,7 +2839,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_name, option_value) VALUES ('zero', '0000-00-00 00:00:00');" );
 
 		$this->assertQuery( 'SELECT YEAR(option_value) as y, MONTH(option_value) as m, DAY(option_value) as d FROM _dates;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 0, $results[0]->y );
 		$this->assertEquals( 0, $results[0]->m );
@@ -2834,7 +2848,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 	public function testDefaultSqlModeDoesNotIncludeNoAutoValueOnZero() {
 		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertStringNotContainsString( 'NO_AUTO_VALUE_ON_ZERO', strtoupper( $results[0]->mode ) );
 	}
@@ -2853,7 +2867,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 
 		$this->assertQuery( 'SELECT ID, option_name FROM _options ORDER BY ID;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEquals( 1, $results[0]->ID );
 		$this->assertEquals( 'a', $results[0]->option_name );
@@ -2874,7 +2888,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "REPLACE INTO _options (ID, option_name, option_value) VALUES ('0', 'replace', '3');" );
 
 		$this->assertQuery( 'SELECT ID, option_name FROM _options ORDER BY ID;' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEquals( 1, $results[0]->ID );
 		$this->assertEquals( 2, $results[1]->ID );
@@ -2890,7 +2904,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		);
 
 		$this->assertQuery( "SELECT ID FROM _options WHERE option_name = 'a';" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 0, $results[0]->ID );
 
@@ -2898,7 +2912,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 			"INSERT INTO _options (ID, option_name, option_value) VALUES (NULL, 'b', '2');"
 		);
 		$this->assertQuery( "SELECT ID FROM _options WHERE option_name = 'b';" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 1, $results[0]->ID );
 	}
@@ -2914,14 +2928,14 @@ class WP_SQLite_Driver_Tests extends TestCase {
 			"INSERT INTO _tmp_table (name) VALUES ('first');"
 		);
 		$this->assertQuery( "SELECT name FROM _tmp_table WHERE name = 'FIRST';" );
-		$this->assertCount( 1, $this->engine->get_query_results() );
+		$this->assertCount( 1, $this->last_result );
 		$this->assertEquals(
 			array(
 				(object) array(
 					'name' => 'first',
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -2932,7 +2946,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_name, option_value) VALUES ('fourth', '2016-01-18T00:00:00Z');" );
 
 		$this->assertQuery( "SELECT * FROM _dates WHERE option_value BETWEEN '2016-01-15T00:00:00Z' AND '2016-01-17T00:00:00Z' ORDER BY ID;" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEquals( 'first', $results[0]->option_name );
 		$this->assertEquals( 'second', $results[1]->option_name );
@@ -2953,9 +2967,23 @@ class WP_SQLite_Driver_Tests extends TestCase {
 			ORDER BY ID
 		"
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 'second', $results[0]->option_name );
+	}
+
+	public function testSelectFilterByNonPaddedDates() {
+		$this->assertQuery( "INSERT INTO _dates (option_name, option_value) VALUES ('first', '2025-02-01 12:00:00');" );
+		$this->assertQuery( "INSERT INTO _dates (option_name, option_value) VALUES ('second', '2025-03-01 12:00:00');" );
+
+		$this->assertQuery(
+			"SELECT * FROM _dates
+			WHERE option_value >= '2025-2-01 0:0:0'
+			AND option_value <= '2025-2-28 23:59:59'"
+		);
+		$results = $this->last_result;
+		$this->assertCount( 1, $results );
+		$this->assertEquals( 'first', $results[0]->option_name );
 	}
 
 	public function testSelectFilterByDatesZeroHour() {
@@ -2972,7 +3000,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 			AND   MINUTE(option_value) = 42
 		'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 'first', $results[0]->option_name );
 	}
@@ -2981,7 +3009,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _dates (option_name, option_value) VALUES ('2016-01-15T00:00:00Z', '2016-01-15T00:00:00Z');" );
 
 		$this->assertQuery( 'SELECT * FROM _dates' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '2016-01-15 00:00:00', $results[0]->option_value );
 		if ( '2016-01-15T00:00:00Z' !== $results[0]->option_name ) {
@@ -2994,33 +3022,33 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( 'BEGIN' );
 		$this->assertQuery( "INSERT INTO _options (option_name) VALUES ('first');" );
 		$this->assertQuery( 'SELECT * FROM _options;' );
-		$this->assertCount( 1, $this->engine->get_query_results() );
+		$this->assertCount( 1, $this->last_result );
 		$this->assertQuery( 'ROLLBACK' );
 
 		$this->assertQuery( 'SELECT * FROM _options;' );
-		$this->assertCount( 0, $this->engine->get_query_results() );
+		$this->assertCount( 0, $this->last_result );
 	}
 
 	public function testTransactionCommit() {
 		$this->assertQuery( 'BEGIN' );
 		$this->assertQuery( "INSERT INTO _options (option_name) VALUES ('first');" );
 		$this->assertQuery( 'SELECT * FROM _options;' );
-		$this->assertCount( 1, $this->engine->get_query_results() );
+		$this->assertCount( 1, $this->last_result );
 		$this->assertQuery( 'COMMIT' );
 
 		$this->assertQuery( 'SELECT * FROM _options;' );
-		$this->assertCount( 1, $this->engine->get_query_results() );
+		$this->assertCount( 1, $this->last_result );
 	}
 
 	public function testStartTransactionCommand() {
 		$this->assertQuery( 'START TRANSACTION' );
 		$this->assertQuery( "INSERT INTO _options (option_name) VALUES ('first');" );
 		$this->assertQuery( 'SELECT * FROM _options;' );
-		$this->assertCount( 1, $this->engine->get_query_results() );
+		$this->assertCount( 1, $this->last_result );
 		$this->assertQuery( 'ROLLBACK' );
 
 		$this->assertQuery( 'SELECT * FROM _options;' );
-		$this->assertCount( 0, $this->engine->get_query_results() );
+		$this->assertCount( 0, $this->last_result );
 	}
 
 	public function testRepeatedTransactionCommands(): void {
@@ -3050,7 +3078,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertQuery( "INSERT INTO _options (option_name) VALUES ('second');" );
 		$this->assertQuery( 'SELECT COUNT(*) as count FROM _options;' );
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertSame( '2', $results[0]->count );
 	}
@@ -3062,7 +3090,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertQuery( 'SELECT option_value FROM _dates' );
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '2003-05-27 10:08:48', $results[0]->option_value );
 
@@ -3072,7 +3100,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertQuery( 'SELECT option_value FROM _dates' );
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '2001-05-27 10:08:48', $results[0]->option_value );
 	}
@@ -3084,7 +3112,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$this->assertQuery( 'SELECT option_value FROM _dates' );
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '2003-05-27 10:08:48', $results[0]->option_value );
 	}
@@ -3108,7 +3136,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		FROM _dates'
 		);
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '2000', $results[0]->year );
 		$this->assertEquals( '5', $results[0]->month );
@@ -3133,13 +3161,13 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		// HOUR(14:08) should yield 14 in the 24 hour format
 		$this->assertQuery( "SELECT  HOUR( _dates.option_value ) as hour FROM _dates WHERE option_name = 'second'" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '14', $results[0]->hour );
 
 		// HOUR(00:08) should yield 0 in the 24 hour format
 		$this->assertQuery( "SELECT  HOUR( _dates.option_value ) as hour FROM _dates WHERE option_name = 'first'" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '0', $results[0]->hour );
 
@@ -3149,7 +3177,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 			WHERE HOUR(_dates.option_value) = 0 '
 		);
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( '0', $results[0]->hour );
 	}
@@ -3173,7 +3201,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
               AND minute(option_value) = 42
 		'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 	}
 
@@ -3191,7 +3219,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 			SELECT * FROM _dates WHERE DATE_FORMAT(option_value, '%H.%i') = 0.42
 		"
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 	}
 
@@ -3210,7 +3238,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertEquals( 1, $result2 );
 
 		$this->assertQuery( 'SELECT COUNT(*) as cnt FROM _tmp_table' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals( 1, $results[0]->cnt );
 	}
 
@@ -3224,11 +3252,11 @@ class WP_SQLite_Driver_Tests extends TestCase {
 				KEY term_taxonomy_id (term_taxonomy_id)
 			   ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci'
 		);
-		$result = $this->engine->query( 'INSERT INTO wptests_term_relationships VALUES (1,2,1),(1,3,2);' );
+		$result = $this->query( 'INSERT INTO wptests_term_relationships VALUES (1,2,1),(1,3,2);' );
 		$this->assertEquals( 2, $result );
 
 		$this->expectExceptionMessage( 'UNIQUE constraint failed: wptests_term_relationships.object_id, wptests_term_relationships.term_taxonomy_id' );
-		$this->engine->query( 'INSERT INTO wptests_term_relationships VALUES (1,2,2),(1,3,1);' );
+		$this->query( 'INSERT INTO wptests_term_relationships VALUES (1,2,2),(1,3,1);' );
 	}
 
 	public function testDescribeAccurate() {
@@ -3248,7 +3276,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$result = $this->assertQuery( 'DESCRIBE wptests_term_relationships;' );
 		$this->assertNotFalse( $result );
 
-		$fields = $this->engine->get_query_results();
+		$fields = $this->last_result;
 
 		$this->assertEquals(
 			array(
@@ -3294,7 +3322,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 
 		$result = $this->assertQuery( 'DESCRIBE _test;' );
 		$this->assertNotFalse( $result );
-		$fields = $this->engine->get_query_results();
+		$fields = $this->last_result;
 
 		$this->assertEquals(
 			array(
@@ -3489,20 +3517,20 @@ class WP_SQLite_Driver_Tests extends TestCase {
 					'Expression'    => null,
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 
 		// With WHERE clause.
 		$this->assertQuery( "SHOW INDEX FROM wptests_term_relationships WHERE Key_name = 'PRIMARY'" );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertCount( 2, $actual );
 
 		$this->assertQuery( 'SHOW INDEX FROM wptests_term_relationships WHERE Non_unique = 0' );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertCount( 2, $actual );
 
 		$this->assertQuery( "SHOW INDEX FROM wptests_term_relationships WHERE Index_type = 'FULLTEXT'" );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertCount( 2, $actual );
 	}
 
@@ -3533,31 +3561,31 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		$this->assertEquals( 2, $result2 );
 
 		$this->assertQuery( 'SELECT COUNT(*) as cnt FROM wptests_term_relationships' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals( 2, $results[0]->cnt );
 	}
 
 	public function testStringToFloatComparison() {
 		$this->assertQuery( "SELECT ('00.42' = 0.4200) as cmp;" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		if ( 1 !== $results[0]->cmp ) {
 			$this->markTestSkipped( 'Comparing a string and a float returns true in MySQL. In SQLite, they\'re different. Skipping. ' );
 		}
 		$this->assertEquals( '1', $results[0]->cmp );
 
 		$this->assertQuery( "SELECT (0+'00.42' = 0.4200) as cmp;" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals( '1', $results[0]->cmp );
 	}
 
 	public function testZeroPlusStringToFloatComparison() {
 
 		$this->assertQuery( "SELECT (0+'00.42' = 0.4200) as cmp;" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals( '1', $results[0]->cmp );
 
 		$this->assertQuery( "SELECT 0+'1234abcd' = 1234 as cmp;" );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals( '1', $results[0]->cmp );
 	}
 
@@ -3688,7 +3716,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 		LIMIT 0, 10'
 		);
 
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 	}
 
@@ -3740,7 +3768,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 					'sorting_order' => '3',
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 
 		$this->assertQuery( 'SELECT option_value FROM _options ORDER BY FIELD(option_name, "User 0000018", "User 0000019", "User 0000020")' );
@@ -3757,7 +3785,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 					'option_value' => 'third',
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -3774,7 +3802,7 @@ class WP_SQLite_Driver_Tests extends TestCase {
 					'ID' => '1',
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -3881,11 +3909,11 @@ QUERY
 
 		$result = $this->assertQuery( 'DELETE FROM t WHERE id = 1' );
 		$this->assertSame( 1, $result );
-		$this->assertSame( 1, $this->engine->get_last_return_value() );
+		$this->assertSame( 1, $this->last_result );
 
 		$result = $this->assertQuery( 'DELETE FROM t WHERE id = 1' );
 		$this->assertSame( 0, $result );
-		$this->assertSame( 0, $this->engine->get_last_return_value() );
+		$this->assertSame( 0, $this->last_result );
 	}
 
 	public function testUpdateReturnsZeroAffectedRowsWhenNoMatchingRows() {
@@ -3897,7 +3925,7 @@ QUERY
 
 		$result = $this->assertQuery( "UPDATE t SET val = 'c' WHERE id = 999" );
 		$this->assertSame( 0, $result );
-		$this->assertSame( 0, $this->engine->get_last_return_value() );
+		$this->assertSame( 0, $this->last_result );
 	}
 
 	public function testTranslatesDoubleAlterTable() {
@@ -3977,7 +4005,7 @@ QUERY
 	public function testRandUnseededReturnsFloatInRange() {
 		for ( $i = 0; $i < 100; $i++ ) {
 			$this->assertQuery( 'SELECT RAND() AS r' );
-			$results = $this->engine->get_query_results();
+			$results = $this->last_result;
 			$value   = (float) $results[0]->r;
 			$this->assertGreaterThanOrEqual( 0.0, $value );
 			$this->assertLessThan( 1.0, $value );
@@ -3993,7 +4021,7 @@ QUERY
 		);
 		foreach ( $seeds_and_expected as $seed => $expected ) {
 			$this->assertQuery( "SELECT RAND($seed) AS r" );
-			$results = $this->engine->get_query_results();
+			$results = $this->last_result;
 			$value   = (float) $results[0]->r;
 			$this->assertEqualsWithDelta( $expected, $value, 1e-12, "RAND($seed) mismatch" );
 		}
@@ -4004,13 +4032,13 @@ QUERY
 		// an intervening statement used a different seed. This pins down the
 		// per-statement flush contract.
 		$this->assertQuery( 'SELECT RAND(3) AS r' );
-		$first_of_3 = (float) $this->engine->get_query_results()[0]->r;
+		$first_of_3 = (float) $this->last_result[0]->r;
 
 		$this->assertQuery( 'SELECT RAND(5) AS r' );
-		$first_of_5 = (float) $this->engine->get_query_results()[0]->r;
+		$first_of_5 = (float) $this->last_result[0]->r;
 
 		$this->assertQuery( 'SELECT RAND(3) AS r' );
-		$first_of_3_again = (float) $this->engine->get_query_results()[0]->r;
+		$first_of_3_again = (float) $this->last_result[0]->r;
 
 		$this->assertSame( $first_of_3, $first_of_3_again );
 		$this->assertNotSame( $first_of_3, $first_of_5 );
@@ -4023,10 +4051,10 @@ QUERY
 		// columns must vary between runs (probability of collision is ~2^-53
 		// per pair, so a match would indicate a shared state bug, not luck).
 		$this->assertQuery( 'SELECT RAND(1) AS r1, RAND() AS r2, RAND() AS r3' );
-		$run1 = $this->engine->get_query_results()[0];
+		$run1 = $this->last_result[0];
 
 		$this->assertQuery( 'SELECT RAND(1) AS r1, RAND() AS r2, RAND() AS r3' );
-		$run2 = $this->engine->get_query_results()[0];
+		$run2 = $this->last_result[0];
 
 		// Seeded column is stable across runs.
 		$this->assertSame( (float) $run1->r1, (float) $run2->r1 );
@@ -4049,7 +4077,7 @@ QUERY
 	public function testRandMultiRowReturnsDifferentValues() {
 		$this->assertQuery( "INSERT INTO _options (option_name, option_value) VALUES ('a', '1'), ('b', '2'), ('c', '3')" );
 		$this->assertQuery( 'SELECT RAND() AS r FROM _options' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$values  = array_map(
 			function ( $row ) {
 				return $row->r;
@@ -4067,7 +4095,7 @@ QUERY
 		// from the MySQL 8.4 manual example "SELECT i, RAND(3) FROM t".
 		$this->assertQuery( "INSERT INTO _options (option_name, option_value) VALUES ('a', '1'), ('b', '2'), ('c', '3')" );
 		$this->assertQuery( 'SELECT RAND(3) AS r FROM _options' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertCount( 3, $results );
 		$this->assertEqualsWithDelta( 0.90576975597606, (float) $results[0]->r, 1e-12 );
 		$this->assertEqualsWithDelta( 0.37307905813035, (float) $results[1]->r, 1e-12 );
@@ -4076,7 +4104,7 @@ QUERY
 		// A second identical query must restart the sequence from seed 3,
 		// not continue where the previous statement left off.
 		$this->assertQuery( 'SELECT RAND(3) AS r FROM _options' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEqualsWithDelta( 0.90576975597606, (float) $results[0]->r, 1e-12 );
 		$this->assertEqualsWithDelta( 0.37307905813035, (float) $results[1]->r, 1e-12 );
 		$this->assertEqualsWithDelta( 0.14808605345719, (float) $results[2]->r, 1e-12 );
@@ -4090,14 +4118,14 @@ QUERY
 		$this->assertQuery( "INSERT INTO _options (option_name, option_value) VALUES ('a', '1'), ('b', '2'), ('c', '3')" );
 
 		$this->assertQuery( 'SELECT RAND(CAST(option_value AS SIGNED)) AS r FROM _options ORDER BY option_name' );
-		$per_row = $this->engine->get_query_results();
+		$per_row = $this->last_result;
 
 		$this->assertQuery( 'SELECT RAND(1) AS r' );
-		$r1 = (float) $this->engine->get_query_results()[0]->r;
+		$r1 = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(2) AS r' );
-		$r2 = (float) $this->engine->get_query_results()[0]->r;
+		$r2 = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(3) AS r' );
-		$r3 = (float) $this->engine->get_query_results()[0]->r;
+		$r3 = (float) $this->last_result[0]->r;
 
 		$this->assertEqualsWithDelta( $r1, (float) $per_row[0]->r, 1e-12 );
 		$this->assertEqualsWithDelta( $r2, (float) $per_row[1]->r, 1e-12 );
@@ -4112,7 +4140,7 @@ QUERY
 
 		// Unseeded `ORDER BY RAND() LIMIT N` — the common "random sample" pattern.
 		$this->assertQuery( 'SELECT option_name FROM _options ORDER BY RAND() LIMIT 2' );
-		$rows = $this->engine->get_query_results();
+		$rows = $this->last_result;
 		$this->assertCount( 2, $rows );
 		foreach ( $rows as $row ) {
 			$this->assertContains( $row->option_name, array( 'a', 'b', 'c', 'd', 'e' ) );
@@ -4129,9 +4157,9 @@ QUERY
 			);
 		};
 		$this->assertQuery( 'SELECT option_name FROM _options ORDER BY RAND(1)' );
-		$first = $extract( $this->engine->get_query_results() );
+		$first = $extract( $this->last_result );
 		$this->assertQuery( 'SELECT option_name FROM _options ORDER BY RAND(1)' );
-		$second = $extract( $this->engine->get_query_results() );
+		$second = $extract( $this->last_result );
 		$this->assertSame( $first, $second );
 		$sorted = $first;
 		sort( $sorted );
@@ -4144,7 +4172,7 @@ QUERY
 		$this->assertQuery( 'SELECT RAND(NULL) AS r' );
 		$this->assertEqualsWithDelta(
 			0.15522042769493574,
-			(float) $this->engine->get_query_results()[0]->r,
+			(float) $this->last_result[0]->r,
 			1e-12
 		);
 
@@ -4153,7 +4181,7 @@ QUERY
 		$this->assertQuery( 'SELECT RAND(NULLIF(1, 1)) AS r' );
 		$this->assertEqualsWithDelta(
 			0.15522042769493574,
-			(float) $this->engine->get_query_results()[0]->r,
+			(float) $this->last_result[0]->r,
 			1e-12
 		);
 	}
@@ -4162,15 +4190,15 @@ QUERY
 		// MySQL's val_int() on DOUBLE rounds to nearest, so RAND(3.9) is
 		// equivalent to RAND(4) and RAND(3.1) to RAND(3).
 		$this->assertQuery( 'SELECT RAND(3.9) AS r' );
-		$from_float = (float) $this->engine->get_query_results()[0]->r;
+		$from_float = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(4) AS r' );
-		$from_int = (float) $this->engine->get_query_results()[0]->r;
+		$from_int = (float) $this->last_result[0]->r;
 		$this->assertSame( $from_int, $from_float );
 
 		$this->assertQuery( 'SELECT RAND(3.1) AS r' );
-		$from_float = (float) $this->engine->get_query_results()[0]->r;
+		$from_float = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(3) AS r' );
-		$from_int = (float) $this->engine->get_query_results()[0]->r;
+		$from_int = (float) $this->last_result[0]->r;
 		$this->assertSame( $from_int, $from_float );
 	}
 
@@ -4178,21 +4206,21 @@ QUERY
 		// Numeric strings are coerced through float-then-round; non-numeric
 		// strings fall back to 0, matching MySQL's val_int() semantics.
 		$this->assertQuery( "SELECT RAND('5') AS r" );
-		$from_string = (float) $this->engine->get_query_results()[0]->r;
+		$from_string = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(5) AS r' );
-		$from_int = (float) $this->engine->get_query_results()[0]->r;
+		$from_int = (float) $this->last_result[0]->r;
 		$this->assertSame( $from_int, $from_string );
 
 		$this->assertQuery( "SELECT RAND('3.9') AS r" );
-		$from_string = (float) $this->engine->get_query_results()[0]->r;
+		$from_string = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(4) AS r' );
-		$from_int = (float) $this->engine->get_query_results()[0]->r;
+		$from_int = (float) $this->last_result[0]->r;
 		$this->assertSame( $from_int, $from_string );
 
 		$this->assertQuery( "SELECT RAND('abc') AS r" );
-		$from_bad_string = (float) $this->engine->get_query_results()[0]->r;
+		$from_bad_string = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(0) AS r' );
-		$from_zero = (float) $this->engine->get_query_results()[0]->r;
+		$from_zero = (float) $this->last_result[0]->r;
 		$this->assertSame( $from_zero, $from_bad_string );
 	}
 
@@ -4201,9 +4229,9 @@ QUERY
 		// before the LCG init). The exact value is defined by the LCG; this
 		// test pins determinism and range, not a reference constant.
 		$this->assertQuery( 'SELECT RAND(-1) AS r' );
-		$v1 = (float) $this->engine->get_query_results()[0]->r;
+		$v1 = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(-1) AS r' );
-		$v2 = (float) $this->engine->get_query_results()[0]->r;
+		$v2 = (float) $this->last_result[0]->r;
 		$this->assertSame( $v1, $v2 );
 		$this->assertGreaterThanOrEqual( 0.0, $v1 );
 		$this->assertLessThan( 1.0, $v1 );
@@ -4216,7 +4244,7 @@ QUERY
 		// second call advances the shared stream and returns the next
 		// value. Pin the current behavior so any future change is explicit.
 		$this->assertQuery( 'SELECT RAND(1) AS a, RAND(1) AS b' );
-		$row = $this->engine->get_query_results()[0];
+		$row = $this->last_result[0];
 		$this->assertEqualsWithDelta( 0.40540353712198, (float) $row->a, 1e-12 );
 		$this->assertNotEquals( (float) $row->a, (float) $row->b );
 		$this->assertGreaterThanOrEqual( 0.0, (float) $row->b );
@@ -4227,9 +4255,9 @@ QUERY
 		// The per-statement flush contract must hold inside a transaction.
 		$this->assertQuery( 'BEGIN' );
 		$this->assertQuery( 'SELECT RAND(1) AS r' );
-		$a = (float) $this->engine->get_query_results()[0]->r;
+		$a = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'SELECT RAND(1) AS r' );
-		$b = (float) $this->engine->get_query_results()[0]->r;
+		$b = (float) $this->last_result[0]->r;
 		$this->assertQuery( 'COMMIT' );
 		$this->assertSame( $a, $b );
 		$this->assertEqualsWithDelta( 0.40540353712198, $a, 1e-12 );
@@ -4239,9 +4267,9 @@ QUERY
 		$this->assertQuery( "INSERT INTO _options (option_name, option_value) VALUES ('a', '1'), ('b', '2'), ('c', '3')" );
 		// Sanity: a predicate that is always true / always false.
 		$this->assertQuery( 'SELECT COUNT(*) AS c FROM _options WHERE RAND() < 2' );
-		$this->assertSame( 3, (int) $this->engine->get_query_results()[0]->c );
+		$this->assertSame( 3, (int) $this->last_result[0]->c );
 		$this->assertQuery( 'SELECT COUNT(*) AS c FROM _options WHERE RAND() > 2' );
-		$this->assertSame( 0, (int) $this->engine->get_query_results()[0]->c );
+		$this->assertSame( 0, (int) $this->last_result[0]->c );
 	}
 
 	public function testRandInUpdateAndInsert() {
@@ -4250,7 +4278,7 @@ QUERY
 		$this->assertQuery( "SELECT option_value FROM _options WHERE option_name = 'a'" );
 		$this->assertEqualsWithDelta(
 			0.40540353712198,
-			(float) $this->engine->get_query_results()[0]->option_value,
+			(float) $this->last_result[0]->option_value,
 			1e-12
 		);
 
@@ -4258,7 +4286,7 @@ QUERY
 		$this->assertQuery( "SELECT option_value FROM _options WHERE option_name = 'b'" );
 		$this->assertEqualsWithDelta(
 			0.40540353712198,
-			(float) $this->engine->get_query_results()[0]->option_value,
+			(float) $this->last_result[0]->option_value,
 			1e-12
 		);
 	}
@@ -4278,7 +4306,7 @@ QUERY
 
 		$this->assertEquals(
 			array( (object) array( 'ą' => 'ąłółźćę†' ) ),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 
 		$this->assertQuery(
@@ -4287,7 +4315,7 @@ QUERY
 
 		$this->assertEquals(
 			array( (object) array( 'ą' => 'ąłółźćę†' ) ),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 
 		$this->assertQuery( 'DELETE FROM _options' );
@@ -4599,7 +4627,7 @@ QUERY
 					"CONCAT('test-', (SELECT DATABASE()))" => 'test-wp',
 				),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -4745,7 +4773,7 @@ QUERY
 				(object) array( 'len' => '2' ),
 				(object) array( 'len' => '3' ),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -4763,7 +4791,7 @@ QUERY
 			array(
 				(object) array( 'name' => "a\0b" ),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -4886,7 +4914,7 @@ QUERY
 				(object) array( 'name' => 'a' ),
 				(object) array( 'name' => 'b' ),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 
 		$this->assertQuery(
@@ -4896,7 +4924,7 @@ QUERY
 			array(
 				(object) array( 'name' => 'a' ),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -4913,7 +4941,7 @@ QUERY
 				(object) array( 'name' => 'a' ),
 				(object) array( 'name' => 'b' ),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 
 		$this->assertQuery(
@@ -4924,7 +4952,7 @@ QUERY
 				(object) array( 'name' => 'a' ),
 				(object) array( 'name' => 'a' ),
 			),
-			$this->engine->get_query_results()
+			$this->last_result
 		);
 	}
 
@@ -4948,7 +4976,7 @@ QUERY
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp_table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 
 		$this->assertEquals(
 			"CREATE TABLE `_tmp_table` (
@@ -4987,7 +5015,7 @@ QUERY
 		$this->assertQuery(
 			'SHOW CREATE TABLE _tmp__table;'
 		);
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			'CREATE TABLE `_tmp__table` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
@@ -6303,14 +6331,14 @@ QUERY
 	}
 
 	public function testQuoteMysqlUtf8StringLiteral(): void {
-		// WP_SQLite_Driver::quote_mysql_utf8_string_literal() is a private method.
+		// WP_MySQL_On_SQLite::quote_mysql_utf8_string_literal() is a private method.
 		// Let's use a closure bound to the driver instance to access it for tests.
 		$quote = Closure::bind(
 			function ( string $utf8_literal ) {
 				return $this->quote_mysql_utf8_string_literal( $utf8_literal );
 			},
 			$this->engine,
-			WP_SQLite_Driver::class
+			WP_MySQL_On_SQLite::class
 		);
 
 		$backslash = chr( 92 );
@@ -6962,13 +6990,16 @@ END;
 	}
 
 	public function testDatabaseNameEmpty(): void {
-		$pdo_class  = PHP_VERSION_ID >= 80400 ? PDO\SQLite::class : PDO::class;
-		$pdo        = new $pdo_class( 'sqlite::memory:' );
-		$connection = new WP_SQLite_Connection( array( 'pdo' => $pdo ) );
-
+		$pdo_class = PHP_VERSION_ID >= 80400 ? PDO\SQLite::class : PDO::class;
+		$pdo       = new $pdo_class( 'sqlite::memory:' );
 		$this->expectException( WP_SQLite_Driver_Exception::class );
 		$this->expectExceptionMessage( 'The database name cannot be empty.' );
-		new WP_SQLite_Driver( $connection, '' );
+		new WP_MySQL_On_SQLite(
+			'mysql-on-sqlite:dbname=',
+			null,
+			null,
+			array( 'pdo' => $pdo )
+		);
 	}
 
 	public function testSelectColumnNames(): void {
@@ -7318,7 +7349,7 @@ END;
 
 	public function testRowLeveLockingClauses() {
 		$this->assertQuery( 'CREATE TABLE t (name VARCHAR(255), value VARCHAR(255))' );
-		$this->engine->query( "INSERT INTO t (name, value) VALUES ('test_lock', '123')" );
+		$this->query( "INSERT INTO t (name, value) VALUES ('test_lock', '123')" );
 
 		// FOR UPDATE
 		$res = $this->assertQuery( "SELECT value FROM t WHERE name = 'test_lock' FOR UPDATE" );
@@ -10188,7 +10219,7 @@ END;
 
 		// SHOW CREATE TABLE
 		$this->assertQuery( 'SHOW CREATE TABLE t' );
-		$result = $this->engine->get_query_results();
+		$result = $this->last_result;
 		$this->assertEquals(
 			implode(
 				"\n",
@@ -10226,7 +10257,7 @@ END;
 
 		// SHOW CREATE TABLE
 		$this->assertQuery( 'SHOW CREATE TABLE t' );
-		$result = $this->engine->get_query_results();
+		$result = $this->last_result;
 		$this->assertEquals(
 			implode(
 				"\n",
@@ -10258,7 +10289,7 @@ END;
 
 		// SHOW CREATE TABLE
 		$this->assertQuery( 'SHOW CREATE TABLE t' );
-		$result = $this->engine->get_query_results();
+		$result = $this->last_result;
 		$this->assertEquals(
 			implode(
 				"\n",
@@ -10280,7 +10311,7 @@ END;
 				$this->main_db_name = $name;
 			},
 			$this->engine,
-			WP_SQLite_Driver::class
+			WP_MySQL_On_SQLite::class
 		);
 
 		// Default database name.
@@ -10322,7 +10353,7 @@ END;
 				$this->main_db_name = $name;
 			},
 			$this->engine,
-			WP_SQLite_Driver::class
+			WP_MySQL_On_SQLite::class
 		);
 
 		$this->assertQuery( 'CREATE TABLE t (id INT, db_name TEXT)' );
@@ -10368,7 +10399,7 @@ END;
 				$this->main_db_name = $name;
 			},
 			$this->engine,
-			WP_SQLite_Driver::class
+			WP_MySQL_On_SQLite::class
 		);
 
 		// Default database name.
@@ -11199,7 +11230,7 @@ END;
 		$this->assertQuery( "INSERT INTO t VALUES ('2')" );
 		$this->assertQuery( "INSERT INTO t VALUES ('3.0')" );
 
-		$is_legacy_sqlite = version_compare( $this->engine->get_sqlite_version(), WP_PDO_MySQL_On_SQLite::MINIMUM_SQLITE_VERSION, '<' );
+		$is_legacy_sqlite = version_compare( $this->engine->get_sqlite_version(), WP_MySQL_On_SQLite::MINIMUM_SQLITE_VERSION, '<' );
 		if ( $is_legacy_sqlite ) {
 			$this->assertQuery( "INSERT INTO t VALUES ('4.5')" );
 			$this->assertQuery( 'INSERT INTO t VALUES (0x05)' );
@@ -11706,7 +11737,7 @@ END;
 		$this->assertQuery( "UPDATE t SET value = '3.0'" );
 		$this->assertSame( '3', $this->assertQuery( 'SELECT * FROM t' )[0]->value );
 
-		$is_legacy_sqlite = version_compare( $this->engine->get_sqlite_version(), WP_PDO_MySQL_On_SQLite::MINIMUM_SQLITE_VERSION, '<' );
+		$is_legacy_sqlite = version_compare( $this->engine->get_sqlite_version(), WP_MySQL_On_SQLite::MINIMUM_SQLITE_VERSION, '<' );
 		if ( $is_legacy_sqlite ) {
 			$this->assertQuery( "UPDATE t SET value = '4.5'" );
 			$this->assertQuery( 'UPDATE t SET value = 0x05' );
@@ -12333,7 +12364,7 @@ END;
 	}
 
 	public function testVersionFunction(): void {
-		$result = $this->engine->query( 'SELECT VERSION()' );
+		$result = $this->query( 'SELECT VERSION()' );
 		$this->assertSame( '8.0.38', $result[0]->{'VERSION()'} );
 	}
 
@@ -12412,7 +12443,7 @@ END;
 
 		// SHOW CREATE TABLE
 		$this->assertQuery( 'SHOW CREATE TABLE test_now_default' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			implode(
 				"\n",
@@ -12428,7 +12459,7 @@ END;
 
 		// DESCRIBE
 		$this->assertQuery( 'DESCRIBE test_now_default' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(
@@ -12470,14 +12501,14 @@ END;
 		// Insert a row and verify the default values
 		$this->assertQuery( 'INSERT INTO t (id) VALUES (1)' );
 		$this->assertQuery( 'SELECT * FROM t WHERE id = 1' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals( 3, $results[0]->col1 );
 		$this->assertStringStartsWith( ( gmdate( 'Y' ) + 1 ) . '-', $results[0]->col2 );
 		$this->assertEquals( 'ab', $results[0]->col3 );
 
 		// SHOW CREATE TABLE
 		$this->assertQuery( 'SHOW CREATE TABLE t' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			implode(
 				"\n",
@@ -12495,7 +12526,7 @@ END;
 
 		// DESCRIBE
 		$this->assertQuery( 'DESCRIBE t' );
-		$results = $this->engine->get_query_results();
+		$results = $this->last_result;
 		$this->assertEquals(
 			array(
 				(object) array(

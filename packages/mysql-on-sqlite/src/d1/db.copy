@@ -133,14 +133,16 @@ class WP_D1_DB extends WP_SQLite_DB {
 				)
 			);
 
-			$this->dbh = new WP_SQLite_Driver(
-				$connection,
-				$this->dbname,
-				80038,
+			$this->dbh = new WP_MySQL_On_SQLite(
+				sprintf( 'mysql-on-sqlite:dbname=%s', str_replace( ';', ';;', $this->dbname ) ),
+				null,
+				null,
 				array(
+					'connection'           => $connection,
 					'transaction_fallback' => (string) wp_sqlite_d1_config( 'WP_D1_TRANSACTION_FALLBACK', 'warn' ),
 				)
 			);
+			$this->dbh->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
 		} catch ( Throwable $e ) {
 			$this->last_error = 'Failed to connect to the D1 database: ' . $e->getMessage();
 		}

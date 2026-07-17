@@ -86,12 +86,15 @@ SQL;
 /**
  * Unit tests using the WordPress table definitions.
  */
-class WP_SQLite_Driver_Query_Tests extends TestCase {
-	/** @var WP_SQLite_Driver */
+class WP_MySQL_On_SQLite_Query_Tests extends TestCase {
+	/** @var WP_MySQL_On_SQLite */
 	private $engine;
 
 	/** @var PDO */
 	private $sqlite;
+
+	/** @var mixed */
+	private $last_result;
 
 	/**
 	 *  Before each test, we create a new volatile database and WordPress tables.
@@ -105,10 +108,11 @@ class WP_SQLite_Driver_Query_Tests extends TestCase {
 		$queries = explode( ';', $tables );
 
 		wp_sqlite_tests_skip_unsupported( $this );
-		$this->engine = wp_sqlite_tests_create_engine( $this->sqlite );
+		$this->engine = wp_sqlite_tests_create_pdo_engine( 'mysql-on-sqlite:dbname=wp', $this->sqlite );
+		$this->engine->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
 
 		try {
-			$this->engine->begin_transaction();
+			$this->engine->beginTransaction();
 			foreach ( $queries as $query ) {
 				$query = trim( $query );
 				if ( empty( $query ) ) {
@@ -172,7 +176,7 @@ SELECT GREATEST('a', 'b') letter;
 QUERY;
 
 		$result = $this->assertQuery( $q );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 1, count( $actual ) );
 		$this->assertEquals( 'b', $actual[0]->letter );
 
@@ -181,7 +185,7 @@ SELECT LEAST('a', 'b') letter;
 QUERY;
 
 		$result = $this->assertQuery( $q );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 1, count( $actual ) );
 		$this->assertEquals( 'a', $actual[0]->letter );
 
@@ -190,7 +194,7 @@ SELECT GREATEST(2, 1.5) num;
 QUERY;
 
 		$result = $this->assertQuery( $q );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 1, count( $actual ) );
 		$this->assertEquals( 2, $actual[0]->num );
 
@@ -199,7 +203,7 @@ SELECT LEAST(2, 1.5, 1.0) num;
 QUERY;
 
 		$result = $this->assertQuery( $q );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 1, count( $actual ) );
 		$this->assertEquals( 1, $actual[0]->num );
 	}
@@ -211,7 +215,7 @@ QUERY;
 
 		$result = $this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 40, count( $actual ) );
 	}
 
@@ -222,7 +226,7 @@ QUERY;
 
 		$result = $this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 40, count( $actual ) );
 	}
 
@@ -233,7 +237,7 @@ QUERY;
 
 		$result = $this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 40, count( $actual ) );
 	}
 
@@ -244,7 +248,7 @@ QUERY;
 
 		$result = $this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 30, count( $actual ) );
 		$last = $actual[ count( $actual ) - 1 ]->meta_key;
 		$this->assertEquals( 'visible_meta_key_30', $last );
@@ -259,7 +263,7 @@ QUERY;
 
 		$this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 40, count( $actual ) );
 		$last = $actual[ count( $actual ) - 1 ]->meta_key;
 		$this->assertEquals( 'visible_meta_key_40', $last );
@@ -272,7 +276,7 @@ QUERY;
 
 		$result = $this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 30, count( $actual ) );
 		$last = $actual[ count( $actual ) - 1 ]->meta_key;
 		$this->assertEquals( 'visible_meta_key_30', $last );
@@ -288,7 +292,7 @@ QUERY;
 
 		$result = $this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 30, count( $actual ) );
 		$last = $actual[ count( $actual ) - 1 ]->meta_key;
 		$this->assertEquals( 'visible_meta_key_30', $last );
@@ -299,7 +303,7 @@ QUERY;
 
 		$result = $this->assertQuery( $q );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 30, count( $actual ) );
 		$last = $actual[ count( $actual ) - 1 ]->meta_key;
 		$this->assertEquals( 'visible_meta_key_30', $last );
@@ -311,7 +315,7 @@ SELECT * FROM wp_options WHERE LENGTH(option_name) != CHAR_LENGTH(option_name)
 QUERY;
 
 		$this->assertQuery( $query );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 0, count( $actual ) );
 	}
 
@@ -325,7 +329,7 @@ WHERE SUBSTR(option_name, -2) !=  SUBSTRING(option_name, -2)
 QUERY;
 
 		$this->assertQuery( $query );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 0, count( $actual ) );
 	}
 
@@ -353,7 +357,7 @@ AND option_name NOT LIKE '%\_transient\_timeout\_%'
 QUERY;
 
 		$this->assertQuery( $query );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 6, count( $actual ) );
 		foreach ( $actual as $row ) {
 			self::assertTrue( str_ends_with( $row->option_name, '_' . $row->suffix ) );
@@ -364,7 +368,7 @@ QUERY;
 		$this->assertQuery(
 			"SELECT * FROM wp_options WHERE option_name LIKE '\_%transient\_%'"
 		);
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 12, count( $actual ) );
 	}
 
@@ -405,7 +409,7 @@ SELECT a.option_id, a.option_name, a.option_value as option_content, a.autoload,
 QUERY;
 
 		$this->assertQuery( $query );
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertEquals( 4, count( $actual ) );
 		foreach ( $actual as $row ) {
 			self::assertLessThan( time(), $row->option_timeout );
@@ -463,7 +467,7 @@ SELECT a.option_id, a.option_name, a.option_value as option_content,
 QUERY;
 
 		$this->assertQuery( $query );
-		$actual          = $this->engine->get_query_results();
+		$actual          = $this->last_result;
 		$count_unexpired = 0;
 		foreach ( $actual as $row ) {
 			if ( str_starts_with( $row->option_name, '_transient' ) ) {
@@ -525,7 +529,7 @@ QUERY;
 QUERY;
 		$this->assertQuery( $get );
 
-		$actual           = $this->engine->get_query_results();
+		$actual           = $this->last_result;
 		$retrieved_name   = $actual[0]->option_name;
 		$retrieved_string = $actual[0]->option_value;
 		$this->assertEquals( $option_value, $retrieved_string );
@@ -551,7 +555,7 @@ QUERY;
 QUERY;
 		$this->assertQuery( $get );
 
-		$actual           = $this->engine->get_query_results();
+		$actual           = $this->last_result;
 		$retrieved_string = $actual[0]->option_value;
 		$this->assertEquals( $option_value, $retrieved_string );
 		$unserialized = unserialize( $retrieved_string );
@@ -630,7 +634,7 @@ QUERY;
 		$query = 'SHOW COLUMNS FROM t';
 		$this->assertQuery( $query );
 
-		$actual = $this->engine->get_query_results();
+		$actual = $this->last_result;
 		$this->assertCount( 6, $actual );
 		foreach ( $actual as $row ) {
 			$this->assertIsObject( $row );
@@ -644,7 +648,13 @@ QUERY;
 	}
 
 	private function assertQuery( $sql ) {
-		$retval = $this->engine->query( $sql );
+		$statement = $this->engine->query( $sql, PDO::FETCH_OBJ );
+		if ( $statement->columnCount() > 0 ) {
+			$this->last_result = $statement->fetchAll();
+		} else {
+			$this->last_result = $statement->rowCount();
+		}
+		$retval = $this->last_result;
 		$this->assertNotFalse( $retval );
 		return $retval;
 	}

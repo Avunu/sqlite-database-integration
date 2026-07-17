@@ -178,6 +178,17 @@ class WP_SQLite_Connection_Tests extends TestCase {
 		);
 	}
 
+	public function testDriverKeepsConfiguredJournalMode(): void {
+		$driver = new WP_MySQL_On_SQLite(
+			sprintf( 'mysql-on-sqlite:path=%s;dbname=wp', $this->db_path ),
+			null,
+			null,
+			array( 'journal_mode' => 'DELETE' )
+		);
+
+		$this->assertSame( 'delete', $this->get_journal_mode( $driver->get_connection() ) );
+	}
+
 	/**
 	 * Create the database file first, and then make its directory read-only,
 	 * so that the WAL sidecar files ("-wal", "-shm") cannot be created.

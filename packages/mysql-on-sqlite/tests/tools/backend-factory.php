@@ -61,22 +61,30 @@ function wp_sqlite_tests_create_engine( ?PDO &$sqlite = null, string $db_name = 
 /**
  * Create a raw engine (PDO API) instance using the selected test backend.
  *
- * @param  string $dsn The engine DSN.
- * @return WP_PDO_MySQL_On_SQLite The engine.
+ * @param  string   $dsn    The engine DSN.
+ * @param  PDO|null $sqlite Set to the underlying SQLite PDO handle, which
+ *                          tests can use to inspect the raw database state.
+ * @return WP_MySQL_On_SQLite The engine.
  */
-function wp_sqlite_tests_create_pdo_engine( string $dsn ): WP_PDO_MySQL_On_SQLite {
+function wp_sqlite_tests_create_pdo_engine( string $dsn, ?PDO &$sqlite = null ): WP_MySQL_On_SQLite {
+	$pdo_class = PHP_VERSION_ID >= 80400 ? PDO\SQLite::class : PDO::class;
+	$sqlite    = new $pdo_class( 'sqlite::memory:' );
+
 	if ( 'd1' === wp_sqlite_tests_backend() ) {
-		return new WP_PDO_MySQL_On_SQLite(
+		// Stringify fetches on the raw handle, so that direct assertions
+		// against it behave as they do with the PDO backend.
+		$sqlite->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
+		return new WP_MySQL_On_SQLite(
 			$dsn,
 			null,
 			null,
 			array(
-				'connection'           => new WP_SQLite_D1_Connection( new WP_SQLite_D1_Fake_Transport() ),
+				'connection'           => new WP_SQLite_D1_Connection( new WP_SQLite_D1_Fake_Transport( $sqlite ) ),
 				'transaction_fallback' => 'ignore',
 			)
 		);
 	}
-	return new WP_PDO_MySQL_On_SQLite( $dsn );
+	return new WP_MySQL_On_SQLite( $dsn, null, null, array( 'pdo' => $sqlite ) );
 }
 
 /**
@@ -115,65 +123,65 @@ function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): v
 function wp_sqlite_tests_d1_skip_list(): array {
 	$list = array(
 		// Interactive transactions and savepoints.
-		'WP_SQLite_Driver_Tests::testStartTransactionCommand' => 'transactions',
-		'WP_SQLite_Driver_Tests::testRepeatedTransactionCommands' => 'transactions',
-		'WP_SQLite_Driver_Tests::testTransactionRollback'  => 'transactions',
-		'WP_SQLite_Driver_Tests::testTransactionSavepoints' => 'transactions',
-		'WP_SQLite_Driver_Tests::testRollbackNonExistentTransactionSavepoint' => 'transactions',
+		'WP_MySQL_On_SQLite_Tests::testStartTransactionCommand' => 'transactions',
+		'WP_MySQL_On_SQLite_Tests::testRepeatedTransactionCommands' => 'transactions',
+		'WP_MySQL_On_SQLite_Tests::testTransactionRollback' => 'transactions',
+		'WP_MySQL_On_SQLite_Tests::testTransactionSavepoints' => 'transactions',
+		'WP_MySQL_On_SQLite_Tests::testRollbackNonExistentTransactionSavepoint' => 'transactions',
 
 		// Temporary tables.
-		'WP_SQLite_Driver_Tests::testCreateTemporaryTable' => 'temporary tables',
-		'WP_SQLite_Driver_Tests::testCreateTemporaryTableIfNotExists' => 'temporary tables',
-		'WP_SQLite_Driver_Tests::testLockTemporaryTables'  => 'temporary tables',
-		'WP_SQLite_Driver_Tests::testNonStrictModeWithTemporaryTable' => 'temporary tables',
-		'WP_SQLite_Driver_Tests::testTemporaryTableHasPriorityOverStandardTable' => 'temporary tables',
+		'WP_MySQL_On_SQLite_Tests::testCreateTemporaryTable' => 'temporary tables',
+		'WP_MySQL_On_SQLite_Tests::testCreateTemporaryTableIfNotExists' => 'temporary tables',
+		'WP_MySQL_On_SQLite_Tests::testLockTemporaryTables' => 'temporary tables',
+		'WP_MySQL_On_SQLite_Tests::testNonStrictModeWithTemporaryTable' => 'temporary tables',
+		'WP_MySQL_On_SQLite_Tests::testTemporaryTableHasPriorityOverStandardTable' => 'temporary tables',
 
 		// The REGEXP operator.
-		'WP_SQLite_Driver_Tests::testRegexp'               => 'REGEXP',
-		'WP_SQLite_Driver_Tests::testRegexps'              => 'REGEXP',
+		'WP_MySQL_On_SQLite_Tests::testRegexp'             => 'REGEXP',
+		'WP_MySQL_On_SQLite_Tests::testRegexps'            => 'REGEXP',
 
 		// Seeded RAND(N).
-		'WP_SQLite_Driver_Tests::testRandOrderBy'          => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandInUpdateAndInsert' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandFloatSeedRoundsToNearestInteger' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandMultipleCallSitesShareLcgState' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandNegativeSeedIsDeterministicAndInRange' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandNonConstantSeedReinitializesPerRow' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandNullIsEquivalentToZeroSeed' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandSeededAndUnseededInSameQueryAreIndependent' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandSeededMultiRowProducesDeterministicSequence' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandSeededProducesDeterministicValues' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandSeededResetsAcrossStatementsInsideTransaction' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandSeededStateIsResetBetweenStatements' => 'seeded RAND',
-		'WP_SQLite_Driver_Tests::testRandStringSeedIsCoercedLikeMySQL' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandOrderBy'        => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandInUpdateAndInsert' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandFloatSeedRoundsToNearestInteger' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandMultipleCallSitesShareLcgState' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandNegativeSeedIsDeterministicAndInRange' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandNonConstantSeedReinitializesPerRow' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandNullIsEquivalentToZeroSeed' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandSeededAndUnseededInSameQueryAreIndependent' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandSeededMultiRowProducesDeterministicSequence' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandSeededProducesDeterministicValues' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandSeededResetsAcrossStatementsInsideTransaction' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandSeededStateIsResetBetweenStatements' => 'seeded RAND',
+		'WP_MySQL_On_SQLite_Tests::testRandStringSeedIsCoercedLikeMySQL' => 'seeded RAND',
 
 		// Strict mode error messages.
-		'WP_SQLite_Driver_Tests::testCastValuesOnInsert'   => 'strict messages',
-		'WP_SQLite_Driver_Tests::testCastValuesOnUpdate'   => 'strict messages',
-		'WP_SQLite_Driver_Tests::testZeroDateRejectedWhenNoZeroDateAndStrictModeAreOn' => 'strict messages',
-		'WP_SQLite_Driver_Tests::testZeroDateInUpdateRejectedWhenNoZeroDateAndStrictModeAreOn' => 'strict messages',
-		'WP_SQLite_Driver_Tests::testZeroInDateRejectedWhenNoZeroInDateAndStrictModeAreOn' => 'strict messages',
-		'WP_SQLite_Driver_Tests::testZeroInDateInUpdateRejectedWhenNoZeroInDateAndStrictModeAreOn' => 'strict messages',
+		'WP_MySQL_On_SQLite_Tests::testCastValuesOnInsert' => 'strict messages',
+		'WP_MySQL_On_SQLite_Tests::testCastValuesOnUpdate' => 'strict messages',
+		'WP_MySQL_On_SQLite_Tests::testZeroDateRejectedWhenNoZeroDateAndStrictModeAreOn' => 'strict messages',
+		'WP_MySQL_On_SQLite_Tests::testZeroDateInUpdateRejectedWhenNoZeroDateAndStrictModeAreOn' => 'strict messages',
+		'WP_MySQL_On_SQLite_Tests::testZeroInDateRejectedWhenNoZeroInDateAndStrictModeAreOn' => 'strict messages',
+		'WP_MySQL_On_SQLite_Tests::testZeroInDateInUpdateRejectedWhenNoZeroInDateAndStrictModeAreOn' => 'strict messages',
 
 		// PHP-evaluated functions with non-constant arguments.
-		'WP_SQLite_Driver_Tests::testTranslateLikeBinary'  => 'PHP evaluation',
-		'WP_SQLite_Driver_Tests::testToBase64Function'     => 'PHP evaluation',
-		'WP_SQLite_Driver_Tests::testFromBase64Function'   => 'PHP evaluation',
-		'WP_SQLite_Driver_Tests::testReverseFunction'      => 'PHP evaluation',
+		'WP_MySQL_On_SQLite_Tests::testTranslateLikeBinary' => 'PHP evaluation',
+		'WP_MySQL_On_SQLite_Tests::testToBase64Function'   => 'PHP evaluation',
+		'WP_MySQL_On_SQLite_Tests::testFromBase64Function' => 'PHP evaluation',
+		'WP_MySQL_On_SQLite_Tests::testReverseFunction'    => 'PHP evaluation',
 
 		// Detailed column metadata.
-		'WP_SQLite_Driver_Tests::testColumnInfo'           => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoWithConstraints' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForIntegerDataTypes' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForUnsignedIntegerDataTypes' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForFloatingPointDataTypes' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForStringDataTypes' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForDateAndTimeDataTypes' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForBinaryDataTypes' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForSpatialDataTypes' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoForExpressions' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoWithZeroRows' => 'column metadata',
-		'WP_SQLite_Driver_Tests::testColumnInfoWithZeroRowsPhpBug' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfo'         => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoWithConstraints' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForIntegerDataTypes' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForUnsignedIntegerDataTypes' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForFloatingPointDataTypes' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForStringDataTypes' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForDateAndTimeDataTypes' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForBinaryDataTypes' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForSpatialDataTypes' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoForExpressions' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoWithZeroRows' => 'column metadata',
+		'WP_MySQL_On_SQLite_Tests::testColumnInfoWithZeroRowsPhpBug' => 'column metadata',
 	);
 	return $list;
 }

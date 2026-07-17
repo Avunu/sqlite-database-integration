@@ -92,7 +92,7 @@ optional capabilities, and the driver adapts:
 # Unit + semantics tests (fake D1 transport, no network):
 composer run test tests/WP_SQLite_D1_Connection_Tests.php \
     tests/WP_SQLite_D1_Connection_Conformance_Tests.php \
-    tests/WP_SQLite_Driver_No_UDF_Tests.php
+    tests/WP_MySQL_On_SQLite_No_UDF_Tests.php
 
 # The full driver suites against the D1 backend:
 WP_SQLITE_TEST_BACKEND=d1 composer run test
