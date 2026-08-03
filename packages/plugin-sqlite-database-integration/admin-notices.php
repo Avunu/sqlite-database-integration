@@ -12,6 +12,9 @@
  * When the plugin gets merged in wp-core, this is not to be ported.
  */
 function sqlite_plugin_admin_notice() {
+	if ( ! current_user_can( sqlite_plugin_get_manage_capability() ) ) {
+		return;
+	}
 
 	// Don't print notices in the plugin's admin screen.
 	global $current_screen;
@@ -66,11 +69,11 @@ function sqlite_plugin_admin_notice() {
 			/* translators: 1: db.php drop-in path, 2: Admin URL to deactivate the module */
 			__( 'The SQLite Integration plugin is active, but the %1$s file is missing. Please <a href="%2$s">deactivate the plugin</a> and re-activate it to try again.', 'sqlite-database-integration' ),
 			'<code>' . esc_html( basename( WP_CONTENT_DIR ) ) . '/db.php</code>',
-			esc_url( admin_url( 'plugins.php' ) )
+			esc_url( self_admin_url( 'plugins.php' ) )
 		)
 	);
 }
-add_action( 'admin_notices', 'sqlite_plugin_admin_notice' ); // Add the admin notices.
+add_action( is_multisite() ? 'network_admin_notices' : 'admin_notices', 'sqlite_plugin_admin_notice' ); // Add the admin notices.
 
 // Remove the PL-plugin admin notices for SQLite.
 remove_action( 'admin_notices', 'perflab_sqlite_plugin_admin_notice' );

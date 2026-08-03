@@ -56,9 +56,9 @@ class WP_SQLite_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * A query logger callback.
 	 *
-	 * @var callable(string, array): void
+	 * @var (callable(string, array): void)|null
 	 */
-	private $query_logger;
+	private $query_logger = null;
 
 	/**
 	 * Whether fetched values are stringified (PDO::ATTR_STRINGIFY_FETCHES).
@@ -480,11 +480,11 @@ class WP_SQLite_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Set a logger for the queries.
+	 * Set or clear a logger for SQLite queries.
 	 *
-	 * @param callable(string, array): void $logger A query logger callback.
+	 * @param (callable(string, array): void)|null $logger A query logger callback, or null to clear it.
 	 */
-	public function set_query_logger( callable $logger ): void {
+	public function set_query_logger( ?callable $logger ): void {
 		$this->query_logger = $logger;
 	}
 }

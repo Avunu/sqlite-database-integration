@@ -4,7 +4,7 @@ Contributors:      wordpressdotorg, aristath, janjakes, zieladam, berislav.grgic
 Requires at least: 6.4
 Tested up to:      7.0
 Requires PHP:      7.2
-Stable tag:        3.0.0-rc.7
+Stable tag:        3.0.0-rc.8
 License:           GPLv2 or later
 License URI:       https://www.gnu.org/licenses/gpl-2.0.html
 Tags:              performance, database
@@ -43,6 +43,17 @@ the wpdb API, while queries are internally adapted to be compatible
 with SQLite syntax and behavior.
 
 == Changelog ==
+
+= 3.0.0-rc.8 =
+
+* Preserve aliases in `UPDATE JOIN` translation ([#462](https://github.com/WordPress/sqlite-database-integration/pull/462))
+* Restrict SQLite installation permissions ([#464](https://github.com/WordPress/sqlite-database-integration/pull/464))
+* Improve string escaping ([#466](https://github.com/WordPress/sqlite-database-integration/pull/466))
+* Stabilize WordPress E2E tests ([#459](https://github.com/WordPress/sqlite-database-integration/pull/459))
+* Address WordPress PHPUnit test fails: charset detection, length validation etc ([#331](https://github.com/WordPress/sqlite-database-integration/pull/331))
+* Add Unicode support to the user-defined `REVERSE()` function ([#453](https://github.com/WordPress/sqlite-database-integration/pull/453))
+* Simplify the MySQL-on-SQLite driver API ([#449](https://github.com/WordPress/sqlite-database-integration/pull/449))
+* Add WordPress 7.0 compatibility ([#450](https://github.com/WordPress/sqlite-database-integration/pull/450))
 
 = 3.0.0-rc.7 =
 
