@@ -1,0 +1,416 @@
+name: Upstream Sync
+
+# Keeps this fork in sync with WordPress/sqlite-database-integration.
+#
+# A standing `upstream-sync` branch proposes the upstream trunk into
+# `d1-support`, and the pull request is updated in place as upstream moves, so
+# it always aggregates every upstream commit that has not landed here yet.
+# Merging is handled by `upstream-sync-merge.yml`, which merges the pull
+# request once it is conflict-free and every check is green. While it is not,
+# the pull request stays open as the one place the drift is visible, and manual
+# intervention is implied.
+#
+# The branch takes one of two shapes, and which one matters:
+#
+#   - **Merged result** (the normal case). The branch is `d1-support` with the
+#     upstream trunk merged into it. The pull request head therefore carries the
+#     fork's own workflows, so the fork-only suites — D1 Backend Tests above all
+#     — run against the merged tree. Testing a head that lacked them would prove
+#     nothing about this fork.
+#   - **Upstream mirror** (only while the merge conflicts). No merged result
+#     exists to push, so the branch mirrors the upstream trunk and GitHub shows
+#     the conflicts on the pull request itself, rather than committing conflict
+#     markers. No checks run on a conflicted pull request anyway. Resolving it
+#     by merging the base into the branch turns it into a merged result, at
+#     which point the suites run normally.
+#
+# A mirror is rebuilt into a merged result as soon as the merge comes clean.
+# That is the only force-push here, and it is safe by construction: a branch
+# whose every commit is already in the upstream trunk carries no work of ours.
+#
+# Setup: this workflow needs the `UPSTREAM_SYNC_TOKEN` repository secret, a
+# fine-grained PAT scoped to this repository with `Contents: RW`,
+# `Pull requests: RW`, `Workflows: RW`, `Actions: read`, `Checks: read` and
+# `Commit statuses: read`. The default `GITHUB_TOKEN` cannot be used: branches
+# pushed and pull requests opened with it deliberately do not trigger
+# `pull_request` workflows, which would leave the sync pull request with no
+# checks to gate on. `Workflows: RW` is required because upstream commits touch
+# `.github/workflows/**`, and a token without it is rejected on push.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *' # Every six hours.
+  workflow_dispatch:
+
+# Never run two syncs at once, and never cancel one midway: a cancelled run can
+# leave the branch pushed but the pull request unwritten.
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+# Disable permissions for all available scopes by default.
+# Any needed permissions should be configured at the job level.
+permissions: {}
+
+jobs:
+  sync:
+    name: Update the upstream sync pull request
+    if: github.repository == 'Avunu/sqlite-database-integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # Required to clone the repo. Writes go through UPSTREAM_SYNC_TOKEN.
+    env:
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      UPSTREAM_REPO: WordPress/sqlite-database-integration
+      UPSTREAM_BRANCH: trunk
+      SYNC_BRANCH: upstream-sync
+      BASE_BRANCH: d1-support
+
+    steps:
+      - name: Verify the sync token is configured
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The UPSTREAM_SYNC_TOKEN secret is missing. See the header of this workflow for how to create it."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+
+      - name: Fetch the upstream and fork branches
+        run: |
+          set -euo pipefail
+
+          git config user.name 'upstream-sync'
+          git config user.email 'upstream-sync@users.noreply.github.com'
+
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/upstream/$UPSTREAM_BRANCH"
+          git fetch --no-tags origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+
+          if git ls-remote --exit-code --heads origin "$SYNC_BRANCH" > /dev/null 2>&1; then
+            git fetch --no-tags origin "+refs/heads/$SYNC_BRANCH:refs/remotes/origin/$SYNC_BRANCH"
+          fi
+
+      - name: Check whether upstream is already merged
+        id: state
+        run: |
+          set -euo pipefail
+
+          if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" "origin/$BASE_BRANCH"; then
+            echo "Upstream $UPSTREAM_BRANCH is already contained in $BASE_BRANCH."
+            echo "up-to-date=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up-to-date=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Someone may have merged upstream by hand, or the gate may have merged
+      # the pull request. Either way, retire the branch so the next sync starts
+      # from a clean slate.
+      - name: Retire the sync branch when there is nothing to sync
+        if: steps.state.outputs.up-to-date == 'true'
+        run: |
+          set -euo pipefail
+
+          PR="$(gh pr list --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$PR" ]; then
+            gh pr comment "$PR" --body "Upstream \`$UPSTREAM_BRANCH\` is now fully contained in \`$BASE_BRANCH\`, so there is nothing left to sync. Closing; the next scheduled run opens a fresh pull request when upstream moves again."
+            gh pr close "$PR" --delete-branch
+          elif git ls-remote --exit-code --heads origin "$SYNC_BRANCH" > /dev/null 2>&1; then
+            git push origin --delete "$SYNC_BRANCH"
+          fi
+
+      - name: Advance the sync branch
+        if: steps.state.outputs.up-to-date != 'true'
+        id: advance
+        run: |
+          set -euo pipefail
+
+          BLOCKED=false
+          REBUILD=true
+          EXISTING=''
+
+          if git ls-remote --exit-code --heads origin "$SYNC_BRANCH" > /dev/null 2>&1; then
+            EXISTING="$(git rev-parse "origin/$SYNC_BRANCH")"
+            git checkout -B "$SYNC_BRANCH" "origin/$SYNC_BRANCH"
+
+            # A branch whose every commit is already in the upstream trunk is a
+            # plain mirror and carries nothing worth preserving. Anything else
+            # holds a merge of ours or a resolution of someone's, and is only
+            # ever advanced in place.
+            if [ "$(git rev-list --count "upstream/$UPSTREAM_BRANCH..$SYNC_BRANCH")" -ne 0 ]; then
+              REBUILD=false
+            fi
+          fi
+
+          if [ "$REBUILD" = 'false' ]; then
+            if git merge-base --is-ancestor "$SYNC_BRANCH" "upstream/$UPSTREAM_BRANCH"; then
+              git merge --ff-only "upstream/$UPSTREAM_BRANCH"
+              echo "Fast-forwarded the sync branch to the upstream tip."
+            elif git merge --no-edit -m "Merge upstream $UPSTREAM_BRANCH into $SYNC_BRANCH" "upstream/$UPSTREAM_BRANCH"; then
+              echo "Merged the new upstream commits into the sync branch."
+            else
+              # The work already on the branch conflicts with newer upstream
+              # commits. Hold the branch where it is; what it already carries
+              # can still be tested and merged.
+              git merge --abort
+              git checkout -B "$SYNC_BRANCH" "origin/$SYNC_BRANCH"
+              BLOCKED=true
+              echo "::warning::New upstream commits conflict with the work already on $SYNC_BRANCH."
+            fi
+            git push origin "HEAD:refs/heads/$SYNC_BRANCH"
+            echo "shape=merged" >> "$GITHUB_OUTPUT"
+          else
+            COUNT="$(git rev-list --count --no-merges "origin/$BASE_BRANCH..upstream/$UPSTREAM_BRANCH")"
+            git checkout -B "$SYNC_BRANCH" "origin/$BASE_BRANCH"
+
+            if git merge --no-edit -m "Merge upstream $UPSTREAM_BRANCH ($COUNT commits)" "upstream/$UPSTREAM_BRANCH"; then
+              echo "shape=merged" >> "$GITHUB_OUTPUT"
+              echo "Built the sync branch as the merged result."
+            else
+              # No merged result exists to push, so mirror the upstream trunk
+              # and let GitHub report the conflicts on the pull request.
+              git merge --abort
+              git checkout -B "$SYNC_BRANCH" "upstream/$UPSTREAM_BRANCH"
+              echo "shape=mirror" >> "$GITHUB_OUTPUT"
+              echo "The merge conflicts; mirroring the upstream trunk instead."
+            fi
+
+            # Rebuilding an existing mirror is the one non-fast-forward push
+            # here. The lease pins it to the mirror this run inspected.
+            if [ -n "$EXISTING" ]; then
+              git push --force-with-lease="refs/heads/$SYNC_BRANCH:$EXISTING" origin "HEAD:refs/heads/$SYNC_BRANCH"
+            else
+              git push origin "HEAD:refs/heads/$SYNC_BRANCH"
+            fi
+          fi
+
+          echo "blocked=$BLOCKED" >> "$GITHUB_OUTPUT"
+
+      # A trial merge on a scratch branch is what turns "CONFLICT (content)"
+      # log spew into a list of files someone can act on. A merged-result
+      # branch is a descendant of the base, so this is clean by construction.
+      - name: Detect conflicts against the base branch
+        if: steps.state.outputs.up-to-date != 'true'
+        id: conflicts
+        run: |
+          set -euo pipefail
+
+          git checkout -B upstream-sync-trial "origin/$BASE_BRANCH"
+
+          if git merge --no-commit --no-ff "$SYNC_BRANCH" > /dev/null 2>&1; then
+            : > "$RUNNER_TEMP/conflicts.txt"
+          else
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+          fi
+          git merge --abort || git reset --hard HEAD
+
+          COUNT="$(wc -l < "$RUNNER_TEMP/conflicts.txt" | tr -d ' ')"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "digest=$(sha1sum < "$RUNNER_TEMP/conflicts.txt" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "Conflicting files:"
+            cat "$RUNNER_TEMP/conflicts.txt"
+          else
+            echo "The merge is clean."
+          fi
+
+      - name: Compose the pull request title and body
+        if: steps.state.outputs.up-to-date != 'true'
+        id: compose
+        env:
+          BLOCKED: ${{ steps.advance.outputs.blocked }}
+          SHAPE: ${{ steps.advance.outputs.shape }}
+          CONFLICT_COUNT: ${{ steps.conflicts.outputs.count }}
+          CONFLICT_DIGEST: ${{ steps.conflicts.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          COMMITS="$(git rev-list --count --no-merges "origin/$BASE_BRANCH..$SYNC_BRANCH")"
+          PENDING="$(git rev-list --count --no-merges "$SYNC_BRANCH..upstream/$UPSTREAM_BRANCH")"
+
+          if [ "$COMMITS" = '1' ]; then
+            echo "title=Sync with upstream $UPSTREAM_BRANCH (1 commit)" >> "$GITHUB_OUTPUT"
+          else
+            echo "title=Sync with upstream $UPSTREAM_BRANCH ($COMMITS commits)" >> "$GITHUB_OUTPUT"
+          fi
+
+          # The body is rewritten only when this fingerprint changes, so an
+          # unchanged sync does not churn the pull request.
+          FINGERPRINT="$(git rev-parse "$SYNC_BRANCH")-$CONFLICT_DIGEST"
+          echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
+
+          # Written to a file rather than piped into `head`, which would trip
+          # `pipefail` by killing `git log` with SIGPIPE on long commit lists.
+          git log --no-merges --format='- %h %s' "origin/$BASE_BRANCH..$SYNC_BRANCH" > "$RUNNER_TEMP/commits.txt"
+
+          BODY="$RUNNER_TEMP/body.md"
+          {
+            echo "Automated sync of [\`$UPSTREAM_REPO@$UPSTREAM_BRANCH\`](https://github.com/$UPSTREAM_REPO/commits/$UPSTREAM_BRANCH) into \`$BASE_BRANCH\`."
+            echo
+            echo "This pull request tracks every upstream commit that has not landed on \`$BASE_BRANCH\` yet."
+            echo "It is updated in place as upstream moves, and merges itself once the merge is clean and"
+            echo "every check is green. While it is open, it needs a person."
+            echo
+            echo "## Upstream commits ($COMMITS)"
+            echo
+            head -n 50 "$RUNNER_TEMP/commits.txt"
+            if [ "$COMMITS" -gt 50 ]; then
+              echo "- …and $((COMMITS - 50)) more"
+            fi
+            echo
+          } > "$BODY"
+
+          if [ "$CONFLICT_COUNT" -gt 0 ]; then
+            {
+              echo "## Merge conflicts ($CONFLICT_COUNT files)"
+              echo
+              echo "\`$BASE_BRANCH\` cannot absorb these changes automatically, so this branch mirrors the"
+              echo "upstream trunk and no checks will run until the conflicts are resolved:"
+              echo
+              while IFS= read -r FILE; do echo "- \`$FILE\`"; done < "$RUNNER_TEMP/conflicts.txt"
+              echo
+              echo "Resolve them by merging the base branch into this one:"
+              echo
+              echo "\`\`\`bash"
+              echo "git fetch origin"
+              echo "git checkout -B $SYNC_BRANCH origin/$SYNC_BRANCH"
+              echo "git merge origin/$BASE_BRANCH   # resolve the conflicts, then commit"
+              echo "git push origin $SYNC_BRANCH"
+              echo "\`\`\`"
+              echo
+            } >> "$BODY"
+          fi
+
+          if [ "$BLOCKED" = 'true' ]; then
+            {
+              echo "> [!WARNING]"
+              echo "> **$PENDING newer upstream commit(s) are not on this branch.** They conflict with the"
+              echo "> work already committed here, so they were left out. What is here can still be merged;"
+              echo "> the next sync then starts over from the conflict. To pull them in now, redo the merge"
+              echo "> above by hand."
+              echo
+            } >> "$BODY"
+          fi
+
+          {
+            echo "---"
+            echo
+            echo "<sub>Branch shape: \`$SHAPE\`. Maintained by [\`upstream-sync.yml\`](https://github.com/$GH_REPO/blob/$BASE_BRANCH/.github/workflows/upstream-sync.yml). Closing this pull request is not permanent — the next scheduled run reopens it. Disable the workflow to stop the sync.</sub>"
+            echo
+            echo "<!-- upstream-sync:$FINGERPRINT -->"
+          } >> "$BODY"
+
+      - name: Create or update the pull request
+        if: steps.state.outputs.up-to-date != 'true'
+        id: pr
+        env:
+          TITLE: ${{ steps.compose.outputs.title }}
+          FINGERPRINT: ${{ steps.compose.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+
+          gh label create upstream-sync --color 0e8a16 --description 'Automated sync with the WordPress upstream' --force
+          gh label create upstream-conflict --color b60205 --description 'Upstream sync needs a manual merge' --force
+
+          PR="$(gh pr list --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')"
+
+          if [ -z "$PR" ]; then
+            gh pr create \
+              --base "$BASE_BRANCH" \
+              --head "$SYNC_BRANCH" \
+              --title "$TITLE" \
+              --body-file "$RUNNER_TEMP/body.md" \
+              --label upstream-sync
+            PR="$(gh pr list --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')"
+            echo "Opened pull request #$PR."
+          else
+            CURRENT="$(gh pr view "$PR" --json body --jq '.body')"
+            case "$CURRENT" in
+              *"<!-- upstream-sync:$FINGERPRINT -->"*)
+                echo "Pull request #$PR is already up to date."
+                ;;
+              *)
+                gh pr edit "$PR" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md" --add-label upstream-sync
+                echo "Updated pull request #$PR."
+                ;;
+            esac
+          fi
+
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+
+      # Body edits do not notify anyone, so a changed conflict set gets a
+      # comment. The marker keeps it to one comment per distinct conflict set
+      # instead of one per scheduled run.
+      - name: Report the conflict state
+        if: steps.state.outputs.up-to-date != 'true'
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          CONFLICT_COUNT: ${{ steps.conflicts.outputs.count }}
+          CONFLICT_DIGEST: ${{ steps.conflicts.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          MARKER="<!-- upstream-sync-conflicts -->"
+          COMMENT_ID="$(gh api "repos/$GH_REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | contains(\"$MARKER\"))] | last | .id // empty")"
+
+          LABELS="$(gh pr view "$PR" --json labels --jq '[.labels[].name] | join(" ")')"
+
+          if [ "$CONFLICT_COUNT" -eq 0 ]; then
+            case " $LABELS " in
+              *' upstream-conflict '*) gh pr edit "$PR" --remove-label upstream-conflict ;;
+            esac
+            if [ -n "$COMMENT_ID" ]; then
+              gh api -X DELETE "repos/$GH_REPO/issues/comments/$COMMENT_ID"
+            fi
+            echo "No conflicts to report."
+            exit 0
+          fi
+
+          case " $LABELS " in
+            *' upstream-conflict '*) ;;
+            *) gh pr edit "$PR" --add-label upstream-conflict ;;
+          esac
+
+          # Nothing to say if the same files were already reported.
+          if [ -n "$COMMENT_ID" ]; then
+            CURRENT="$(gh api "repos/$GH_REPO/issues/comments/$COMMENT_ID" --jq '.body')"
+            case "$CURRENT" in
+              *"$MARKER $CONFLICT_DIGEST"*)
+                echo "The conflict set is unchanged since the last report."
+                exit 0
+                ;;
+            esac
+          fi
+
+          COMMENT="$RUNNER_TEMP/comment.md"
+          {
+            echo "This sync does not merge cleanly into \`$BASE_BRANCH\`. **$CONFLICT_COUNT file(s) conflict:**"
+            echo
+            while IFS= read -r FILE; do echo "- \`$FILE\`"; done < "$RUNNER_TEMP/conflicts.txt"
+            echo
+            echo "Checks cannot run until this is resolved — GitHub has no merge commit to test. Resolve"
+            echo "by merging the base branch into this one, and the pull request merges itself once the"
+            echo "suites go green:"
+            echo
+            echo "\`\`\`bash"
+            echo "git fetch origin"
+            echo "git checkout -B $SYNC_BRANCH origin/$SYNC_BRANCH"
+            echo "git merge origin/$BASE_BRANCH   # resolve the conflicts, then commit"
+            echo "git push origin $SYNC_BRANCH"
+            echo "\`\`\`"
+            echo
+            echo "$MARKER $CONFLICT_DIGEST"
+          } > "$COMMENT"
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api -X DELETE "repos/$GH_REPO/issues/comments/$COMMENT_ID"
+          fi
+          gh pr comment "$PR" --body-file "$COMMENT"

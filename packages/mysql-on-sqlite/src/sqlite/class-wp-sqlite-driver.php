@@ -66,25 +66,30 @@ class WP_SQLite_Driver {
 	 *
 	 * Set up an SQLite connection and the MySQL-on-SQLite driver.
 	 *
-	 * @param WP_SQLite_Connection $connection    A SQLite database connection.
-	 * @param string               $database      The database name.
-	 * @param int                  $mysql_version The emulated MySQL version as an integer.
+	 * @param WP_SQLite_Connection_Interface $connection    A SQLite database connection.
+	 * @param string                         $database      The database name.
+	 * @param int                            $mysql_version The emulated MySQL version as an integer.
+	 * @param array                          $options       Additional driver options,
+	 *                                                      as per WP_MySQL_On_SQLite.
 	 *
 	 * @throws WP_MySQL_On_SQLite_Exception When the driver initialization fails.
 	 */
 	public function __construct(
-		WP_SQLite_Connection $connection,
+		WP_SQLite_Connection_Interface $connection,
 		string $database,
-		int $mysql_version = WP_MySQL_On_SQLite::DEFAULT_MYSQL_VERSION
+		int $mysql_version = WP_MySQL_On_SQLite::DEFAULT_MYSQL_VERSION,
+		array $options = array()
 	) {
 		$this->mysql_on_sqlite_driver = new WP_MySQL_On_SQLite(
 			sprintf( 'mysql-on-sqlite:dbname=%s', str_replace( ';', ';;', $database ) ),
 			null,
 			null,
-			array(
-				'mysql_version'       => $mysql_version,
-				'sqlite_pdo'          => $connection->get_pdo(),
-				'sqlite_journal_mode' => $connection->query( 'PRAGMA journal_mode' )->fetchColumn(),
+			array_merge(
+				$options,
+				array(
+					'mysql_version'     => $mysql_version,
+					'sqlite_connection' => $connection,
+				)
 			)
 		);
 		$this->client_info            = $this->mysql_on_sqlite_driver->client_info;
@@ -95,9 +100,9 @@ class WP_SQLite_Driver {
 	/**
 	 * Get the SQLite connection instance.
 	 *
-	 * @return WP_SQLite_Connection
+	 * @return WP_SQLite_Connection_Interface
 	 */
-	public function get_connection(): WP_SQLite_Connection {
+	public function get_connection(): WP_SQLite_Connection_Interface {
 		return $this->mysql_on_sqlite_driver->get_connection();
 	}
 
