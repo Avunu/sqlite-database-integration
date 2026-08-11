@@ -1,9 +1,6 @@
 <?php
 /**
  * Extend and replace the wpdb class.
- *
- * @package wp-sqlite-integration
- * @since 1.0.0
  */
 
 /**
@@ -19,13 +16,6 @@ class WP_SQLite_DB extends wpdb {
 	 * @var WP_MySQL_On_SQLite
 	 */
 	protected $dbh;
-
-	/**
-	 * Whether the PDO instance was provided externally through $GLOBALS['@pdo'].
-	 *
-	 * @var bool
-	 */
-	private $is_pdo_external;
 
 	/**
 	 * Backward compatibility, see wpdb::$allow_unsafe_unquoted_parameters.
@@ -61,6 +51,20 @@ class WP_SQLite_DB extends wpdb {
 
 		parent::__construct( '', '', $dbname, '' );
 		$this->charset = 'utf8mb4';
+	}
+
+	/**
+	 * Returns the active MySQL-on-SQLite driver.
+	 *
+	 * @return WP_MySQL_On_SQLite The active driver.
+	 * @throws RuntimeException When there is no active database connection.
+	 */
+	public function get_driver(): WP_MySQL_On_SQLite {
+		if ( ! $this->dbh ) {
+			throw new RuntimeException( 'Cannot access the driver without an active database connection.' );
+		}
+
+		return $this->dbh;
 	}
 
 	/**
@@ -212,14 +216,8 @@ class WP_SQLite_DB extends wpdb {
 			return false;
 		}
 
-		/*
-		 * @TODO: Replace and deprecate the $GLOBALS['@pdo'] injection mechanism.
-		 * PDO has no close method and is released only when all references are unset.
-		 * Until then, retain external PDOs so reconnects reuse the same database.
-		 */
 		if (
-			! $this->is_pdo_external
-			&& isset( $GLOBALS['@pdo'] )
+			isset( $GLOBALS['@pdo'] )
 			&& $GLOBALS['@pdo'] === $pdo
 		) {
 			unset( $GLOBALS['@pdo'] );
@@ -423,12 +421,16 @@ class WP_SQLite_DB extends wpdb {
 		}
 
 		$this->last_error = '';
+		if ( isset( $GLOBALS['@pdo'] ) ) {
+			trigger_error(
+				'PDO injection via $GLOBALS[\'@pdo\'] is no longer supported. The existing PDO will be ignored and a new connection will be created.',
+				E_USER_WARNING
+			);
+		}
+
 		if ( ! isset( $this->charset ) ) {
 			$this->init_charset();
 		}
-
-		$this->is_pdo_external = isset( $GLOBALS['@pdo'] );
-		$pdo                   = $this->is_pdo_external ? $GLOBALS['@pdo'] : null;
 
 		// Migrate the database file from a legacy path, if it exists.
 		if ( ! defined( 'DB_FILE' ) && ! file_exists( FQDB ) ) {
@@ -461,12 +463,9 @@ class WP_SQLite_DB extends wpdb {
 
 		try {
 			$options = array(
-				'journal_mode' => defined( 'SQLITE_JOURNAL_MODE' ) ? SQLITE_JOURNAL_MODE : null,
+				'sqlite_journal_mode' => defined( 'SQLITE_JOURNAL_MODE' ) ? SQLITE_JOURNAL_MODE : null,
 			);
-			if ( null !== $pdo ) {
-				$options['pdo'] = $pdo;
-			}
-			$dbh = new WP_MySQL_On_SQLite(
+			$dbh     = new WP_MySQL_On_SQLite(
 				sprintf(
 					'mysql-on-sqlite:path=%s;dbname=%s',
 					str_replace( ';', ';;', FQDB ),
@@ -477,9 +476,15 @@ class WP_SQLite_DB extends wpdb {
 				$options
 			);
 			$dbh->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true ); // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO
-			$pdo             = $dbh->get_connection()->get_pdo();
-			$this->dbh       = $dbh;
-			$GLOBALS['@pdo'] = $pdo;
+			$this->dbh = $dbh;
+
+			/**
+			 * Exposes the underlying PDO SQLite connection for backward compatibility.
+			 *
+			 * @deprecated 3.0.0 Use WP_SQLite_DB::get_driver() with
+			 *                   WP_MySQL_On_SQLite::get_sqlite_pdo() instead.
+			 */
+			$GLOBALS['@pdo'] = $dbh->get_sqlite_pdo();
 		} catch ( Throwable $e ) {
 			$this->last_error = $this->format_error_message( $e );
 		}
@@ -607,7 +612,7 @@ class WP_SQLite_DB extends wpdb {
 
 			// Take note of the insert_id.
 			if ( preg_match( '/^\s*(insert|replace)\s/i', $query ) ) {
-				$this->insert_id = $this->dbh->get_insert_id();
+				$this->insert_id = (int) $this->dbh->lastInsertId();
 			}
 
 			// Return number of rows affected.
@@ -698,7 +703,11 @@ class WP_SQLite_DB extends wpdb {
 			return;
 		}
 		$this->col_info = array();
-		foreach ( $this->dbh->get_last_column_meta() as $column ) {
+		if ( null === $this->result ) {
+			return;
+		}
+		for ( $i = 0; $i < $this->result->columnCount(); $i++ ) {
+			$column           = $this->result->getColumnMeta( $i );
 			$this->col_info[] = (object) array(
 				'name'       => $column['name'],
 				'orgname'    => $column['mysqli:orgname'],
@@ -737,29 +746,33 @@ class WP_SQLite_DB extends wpdb {
 	}
 
 	/**
-	 * Method to return database version number.
+	 * Retrieves the emulated database server version number.
 	 *
-	 * This overrides wpdb::db_version() to avoid using MySQL function.
-	 * It returns mysql version number, but it means nothing for SQLite.
-	 * So it return the newest mysql version.
+	 * This mirrors wpdb::db_version(), but must also be defined here because
+	 * WordPress 5.4 and older fetch server information directly from the MySQL
+	 * extension instead of delegating to wpdb::db_server_info().
 	 *
 	 * @see wpdb::db_version()
+	 *
+	 * @return string Version number on success, or an empty string while disconnected.
 	 */
 	public function db_version() {
-		return '8.0';
+		return preg_replace( '/[^0-9.].*/', '', $this->db_server_info() );
 	}
 
 	/**
-	 * Returns the version of the SQLite engine.
+	 * Returns the raw version string of the emulated MySQL server.
 	 *
-	 * @return string SQLite engine version, or an empty string while disconnected.
+	 * @see wpdb::db_server_info()
+	 *
+	 * @return string Emulated MySQL server version, or an empty string while disconnected.
 	 */
 	public function db_server_info() {
 		if ( ! $this->dbh ) {
 			return '';
 		}
 
-		return $this->dbh->get_sqlite_version();
+		return $this->dbh->getAttribute( PDO::ATTR_SERVER_VERSION ); // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO
 	}
 
 	/**
@@ -811,7 +824,7 @@ class WP_SQLite_DB extends wpdb {
 
 
 	/**
-	 * Format SQLite driver error message.
+	 * Format MySQL-on-SQLite driver error message.
 	 *
 	 * @return string
 	 */
@@ -819,8 +832,8 @@ class WP_SQLite_DB extends wpdb {
 		$output = '<div style="clear:both">&nbsp;</div>' . PHP_EOL;
 
 		// Queries.
-		if ( $e instanceof WP_SQLite_Driver_Exception ) {
-			$driver = $e->getDriver();
+		if ( $e instanceof WP_MySQL_On_SQLite_Exception ) {
+			$driver = $e->get_driver();
 
 			$output .= '<div class="queries" style="clear:both;margin-bottom:2px;border:red dotted thin;">' . PHP_EOL;
 			$output .= '<p>MySQL query:</p>' . PHP_EOL;

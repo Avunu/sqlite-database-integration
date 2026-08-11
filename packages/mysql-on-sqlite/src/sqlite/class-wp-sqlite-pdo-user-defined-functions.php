@@ -1,29 +1,19 @@
 <?php
 /**
  * Custom functions for the SQLite implementation.
- *
- * @package wp-sqlite-integration
- * @since 1.0.0
  */
 
 /**
- * This class defines user defined functions(UDFs) for PDO library.
+ * Registers MySQL-compatible functions with PDO SQLite.
  *
- * These functions replace those used in the SQL statement with the PHP functions.
+ * Each callback implements a MySQL SQL function that SQLite does not provide.
  *
- * Usage:
- *
- * <code>
- * new WP_SQLite_PDO_User_Defined_Functions(ref_to_pdo_obj);
- * </code>
- *
- * This automatically enables ref_to_pdo_obj to replace the function in the SQL statement
- * to the ones defined here.
+ * @access private
  */
 class WP_SQLite_PDO_User_Defined_Functions {
 
 	/**
-	 * Registers the user defined functions for SQLite to a connection.
+	 * Register the user-defined SQLite functions on a connection.
 	 *
 	 * The functions are implemented as PHP callbacks and registered using
 	 * the "create_function()" method of the SQLite connection interface.
@@ -951,7 +941,7 @@ class WP_SQLite_PDO_User_Defined_Functions {
 	}
 
 	/**
-	 * A helper to covert LIKE pattern to a GLOB pattern for "LIKE BINARY" support.
+	 * A helper to convert a LIKE pattern to a GLOB pattern for "LIKE BINARY" support.
 
 	 * @TODO: Some of the MySQL string specifics described below are likely to
 	 *        affect also other patterns than just "LIKE BINARY". We should

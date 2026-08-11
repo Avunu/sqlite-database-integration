@@ -135,20 +135,20 @@ class WP_MySQL_On_SQLite_No_UDF_Tests extends TestCase {
 		$this->d1_driver->query( 'CREATE TABLE t ( d DATETIME )' );
 		$this->d1_driver->query( "INSERT INTO t (d) VALUES ('2026-07-02 10:00:00')" );
 
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->d1_driver->query( "INSERT INTO t (d) VALUES ('not-a-date')" );
 	}
 
 	public function test_regexp_is_reported_as_not_supported(): void {
 		$this->d1_driver->query( 'CREATE TABLE t ( name TEXT )' );
 
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'REGEXP' );
 		$this->d1_driver->query( "SELECT * FROM t WHERE name REGEXP '^a'" );
 	}
 
 	public function test_seeded_rand_is_reported_as_not_supported(): void {
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'RAND(N)' );
 		$this->d1_driver->query( 'SELECT RAND(42)' );
 	}
@@ -156,7 +156,7 @@ class WP_MySQL_On_SQLite_No_UDF_Tests extends TestCase {
 	public function test_md5_with_non_constant_argument_is_reported_as_not_supported(): void {
 		$this->d1_driver->query( 'CREATE TABLE t ( name TEXT )' );
 
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'MD5()' );
 		$this->d1_driver->query( 'SELECT MD5(name) FROM t' );
 	}

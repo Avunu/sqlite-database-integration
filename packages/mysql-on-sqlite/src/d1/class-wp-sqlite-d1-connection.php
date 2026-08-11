@@ -72,6 +72,18 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	private $default_fetch_mode = PDO::FETCH_BOTH;
 
 	/**
+	 * The error mode (PDO::ATTR_ERRMODE).
+	 *
+	 * Failures always surface as exceptions from the transport. The driver
+	 * still reads and restores this attribute to track the caller's chosen
+	 * error mode while keeping its own internal operations in exception mode,
+	 * so the value is stored and reported back faithfully.
+	 *
+	 * @var int
+	 */
+	private $error_mode = PDO::ERRMODE_EXCEPTION;
+
+	/**
 	 * The last inserted row ID reported by the database.
 	 *
 	 * @var int
@@ -385,6 +397,19 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 			$this->default_fetch_mode = (int) $value;
 			return true;
 		}
+		if ( PDO::ATTR_ERRMODE === $attribute ) {
+			if (
+				! in_array(
+					$value,
+					array( PDO::ERRMODE_SILENT, PDO::ERRMODE_WARNING, PDO::ERRMODE_EXCEPTION ),
+					true
+				)
+			) {
+				return false;
+			}
+			$this->error_mode = $value;
+			return true;
+		}
 		return false;
 	}
 
@@ -406,7 +431,7 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 			return $this->get_server_version();
 		}
 		if ( PDO::ATTR_ERRMODE === $attribute ) {
-			return PDO::ERRMODE_EXCEPTION;
+			return $this->error_mode;
 		}
 		return null;
 	}

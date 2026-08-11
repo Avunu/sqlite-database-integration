@@ -3,6 +3,19 @@
 use PHPUnit\Framework\TestCase;
 
 class WP_MySQL_On_SQLite_Tests extends TestCase {
+	/**
+	 * SQL mode bit values asserted independently from the driver implementation.
+	 */
+	private const SQL_MODE_REAL_AS_FLOAT            = 1 << 0;
+	private const SQL_MODE_PIPES_AS_CONCAT          = 1 << 1;
+	private const SQL_MODE_ANSI_QUOTES              = 1 << 2;
+	private const SQL_MODE_NOT_USED                 = 1 << 4;
+	private const SQL_MODE_POSTGRESQL               = 1 << 8;
+	private const SQL_MODE_ORACLE                   = 1 << 9;
+	private const SQL_MODE_NO_BACKSLASH_ESCAPES     = 1 << 20;
+	private const SQL_MODE_TIME_TRUNCATE_FRACTIONAL = 1 << 32;
+	private const UNKNOWN_SQL_MODE_BIT              = 1 << 33;
+
 	/** @var WP_MySQL_On_SQLite */
 	private $engine;
 
@@ -11,6 +24,9 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 
 	/** @var mixed */
 	private $last_result;
+
+	/** @var WP_MySQL_On_SQLite_Statement */
+	private $last_statement;
 
 	// Before each test, we create a new database
 	public function setUp(): void {
@@ -43,7 +59,7 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 		$exception = null;
 		try {
 			$this->query( $sql );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception, 'An exception was expected, but none was thrown.' );
@@ -51,13 +67,23 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 	}
 
 	private function query( $sql ) {
-		$statement = $this->engine->query( $sql, PDO::FETCH_OBJ );
+		$statement            = $this->engine->query( $sql, PDO::FETCH_OBJ );
+		$this->last_statement = $statement;
 		if ( $statement->columnCount() > 0 ) {
 			$this->last_result = $statement->fetchAll();
 		} else {
 			$this->last_result = $statement->rowCount();
 		}
 		return $this->last_result;
+	}
+
+	private function getLastColumnMeta(): array {
+		$column_meta  = array();
+		$column_count = $this->last_statement->columnCount();
+		for ( $i = 0; $i < $column_count; $i++ ) {
+			$column_meta[] = $this->last_statement->getColumnMeta( $i );
+		}
+		return $column_meta;
 	}
 
 	public function testRegexp() {
@@ -2853,6 +2879,260 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 		$this->assertStringNotContainsString( 'NO_AUTO_VALUE_ON_ZERO', strtoupper( $results[0]->mode ) );
 	}
 
+	public function testSqlModesUseCanonicalBitmapOrder() {
+		$this->assertQuery(
+			"SET sql_mode = 'no_engine_substitution,only_full_group_by,strict_all_tables,only_full_group_by'"
+		);
+
+		$this->assertTrue( $this->engine->is_sql_mode_active( 'ONLY_FULL_GROUP_BY' ) );
+		$this->assertTrue( $this->engine->is_sql_mode_active( 'strict_all_tables' ) );
+		$this->assertTrue( $this->engine->is_sql_mode_active( 'NO_ENGINE_SUBSTITUTION' ) );
+		$this->assertFalse( $this->engine->is_sql_mode_active( 'STRICT_TRANS_TABLES' ) );
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame(
+			'ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION',
+			$this->last_result[0]->mode
+		);
+	}
+
+	public function testSqlModesAcceptNumericBitmap() {
+		$bitmap = self::SQL_MODE_REAL_AS_FLOAT
+			| self::SQL_MODE_PIPES_AS_CONCAT
+			| self::SQL_MODE_TIME_TRUNCATE_FRACTIONAL;
+		$this->assertQuery( "SET sql_mode = $bitmap" );
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame(
+			'REAL_AS_FLOAT,PIPES_AS_CONCAT,TIME_TRUNCATE_FRACTIONAL',
+			$this->last_result[0]->mode
+		);
+	}
+
+	public function testMySQL8PreservesNotUsedSqlModeBit() {
+		$this->assertQuery( "SET sql_mode = 'NOT_USED'" );
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'NOT_USED', $this->last_result[0]->mode );
+
+		$this->assertQuery( 'SET sql_mode = ' . self::SQL_MODE_NOT_USED );
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'NOT_USED', $this->last_result[0]->mode );
+	}
+
+	public function testMySQL57PreservesUnnamedSqlModeBit() {
+		$this->engine = new WP_MySQL_On_SQLite(
+			'mysql-on-sqlite:dbname=wp',
+			null,
+			null,
+			array(
+				'sqlite_pdo'    => $this->sqlite,
+				'mysql_version' => 50744,
+			)
+		);
+
+		// MySQL 5.7 serializes its unnamed bit 4 through a "," name-table placeholder.
+		$this->assertQuery( 'SET sql_mode = ' . self::SQL_MODE_NOT_USED );
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( ',', $this->last_result[0]->mode );
+		$this->assertFalse( $this->engine->is_sql_mode_active( 'NOT_USED' ) );
+	}
+
+	public function testSqlModeValidationUsesEmulatedMySQLVersion() {
+		$this->engine = new WP_MySQL_On_SQLite(
+			'mysql-on-sqlite:dbname=wp',
+			null,
+			null,
+			array(
+				'sqlite_pdo'    => $this->sqlite,
+				'mysql_version' => 50744,
+			)
+		);
+
+		$this->assertQuery( "SET sql_mode = 'POSTGRESQL,NO_AUTO_CREATE_USER'" );
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'POSTGRESQL,NO_AUTO_CREATE_USER', $this->last_result[0]->mode );
+
+		$time_truncate_fractional = self::SQL_MODE_TIME_TRUNCATE_FRACTIONAL;
+		foreach (
+			array(
+				array( "SET sql_mode = 'TIME_TRUNCATE_FRACTIONAL'", 'TIME_TRUNCATE_FRACTIONAL' ),
+				array( "SET sql_mode = $time_truncate_fractional", (string) $time_truncate_fractional ),
+			) as $invalid_sql_mode
+		) {
+			$exception = null;
+			try {
+				$this->query( $invalid_sql_mode[0] );
+			} catch ( WP_MySQL_On_SQLite_Exception $e ) {
+				$exception = $e;
+			}
+
+			$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
+			$this->assertSame(
+				sprintf(
+					"SQLSTATE[42000]: Syntax error or access violation: 1231 Variable 'sql_mode' can't be set to the value of '%s'",
+					$invalid_sql_mode[1]
+				),
+				$exception->getMessage()
+			);
+			$this->assertSame( '42000', $exception->getCode() );
+		}
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'POSTGRESQL,NO_AUTO_CREATE_USER', $this->last_result[0]->mode );
+	}
+
+	public function testMySQL57RejectsNotUsedSqlModeName() {
+		$this->engine = new WP_MySQL_On_SQLite(
+			'mysql-on-sqlite:dbname=wp',
+			null,
+			null,
+			array(
+				'sqlite_pdo'    => $this->sqlite,
+				'mysql_version' => 50744,
+			)
+		);
+
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
+		$this->expectExceptionCode( '42000' );
+		$this->expectExceptionMessage(
+			"SQLSTATE[42000]: Syntax error or access violation: 1231 Variable 'sql_mode' can't be set to the value of 'NOT_USED'"
+		);
+
+		$this->query( "SET sql_mode = 'NOT_USED'" );
+	}
+
+	public function testRemovedSqlModeBitmapThrowsMySQLError() {
+		$this->assertQuery( "SET sql_mode = 'ANSI_QUOTES'" );
+
+		$bitmap    = self::SQL_MODE_ANSI_QUOTES | self::SQL_MODE_POSTGRESQL | self::SQL_MODE_ORACLE;
+		$exception = null;
+		try {
+			$this->query( "SET sql_mode = $bitmap" );
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
+			$exception = $e;
+		}
+
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
+		$this->assertSame(
+			'SQLSTATE[HY000]: General error: 3899 sql_mode=0x00000300 is not supported.',
+			$exception->getMessage()
+		);
+		$this->assertSame( 'HY000', $exception->getCode() );
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'ANSI_QUOTES', $this->last_result[0]->mode );
+	}
+
+	public function testSqlModeDefaultRestoresDefaultBitmap() {
+		$this->assertQuery( "SET sql_mode = ''" );
+		$this->assertQuery( 'SET sql_mode = DEFAULT' );
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		// Keep the expectation independent so accidental changes to the driver default fail this test.
+		$this->assertSame(
+			'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION',
+			$this->last_result[0]->mode
+		);
+	}
+
+	public function testSqlModeDefaultUsesEmulatedMySQLVersion() {
+		$this->engine = new WP_MySQL_On_SQLite(
+			'mysql-on-sqlite:dbname=wp',
+			null,
+			null,
+			array(
+				'sqlite_pdo'    => $this->sqlite,
+				'mysql_version' => 50744,
+			)
+		);
+
+		$expected_modes = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION';
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( $expected_modes, $this->last_result[0]->mode );
+
+		$this->assertQuery( "SET sql_mode = ''" );
+		$this->assertQuery( 'SET sql_mode = DEFAULT' );
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( $expected_modes, $this->last_result[0]->mode );
+	}
+
+	/**
+	 * @dataProvider invalidSqlModeValues
+	 */
+	public function testInvalidSqlModeValueThrowsMySQLError( string $query, string $invalid_value ) {
+		$this->assertQuery( "SET sql_mode = 'ANSI_QUOTES'" );
+
+		$exception = null;
+		try {
+			$this->query( $query );
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
+			$exception = $e;
+		}
+
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
+		$this->assertSame(
+			sprintf(
+				"SQLSTATE[42000]: Syntax error or access violation: 1231 Variable 'sql_mode' can't be set to the value of '%s'",
+				$invalid_value
+			),
+			$exception->getMessage()
+		);
+		$this->assertSame( '42000', $exception->getCode() );
+
+		// A rejected assignment must not change the active modes.
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'ANSI_QUOTES', $this->last_result[0]->mode );
+	}
+
+	public function invalidSqlModeValues(): array {
+		$unknown_sql_mode_bit = self::UNKNOWN_SQL_MODE_BIT;
+
+		return array(
+			'unknown mode'              => array( "SET sql_mode = 'FOOBAR'", 'FOOBAR' ),
+			'ON keyword'                => array( 'SET sql_mode = ON', 'ON' ),
+			'quoted OFF'                => array( "SET sql_mode = 'OFF'", 'OFF' ),
+			'quoted DEFAULT'            => array( "SET sql_mode = 'DEFAULT'", 'DEFAULT' ),
+			'mode removed in MySQL 8.0' => array( "SET sql_mode = 'POSTGRESQL'", 'POSTGRESQL' ),
+			'mixed valid and invalid'   => array( "SET sql_mode = 'ERROR_FOR_DIVISION_BY_ZERO,FOOBAR,IGNORE_SPACE'", 'FOOBAR' ),
+			'invalid among empty modes' => array( "SET sql_mode = ',,,,FOOBAR,,,,,'", 'FOOBAR' ),
+			'leading mode whitespace'   => array( "SET sql_mode = 'ANSI_QUOTES, NO_ENGINE_SUBSTITUTION'", ' NO_ENGINE_SUBSTITUTION' ),
+			'trailing mode whitespace'  => array( "SET sql_mode = 'ANSI_QUOTES ,NO_ENGINE_SUBSTITUTION'", 'ANSI_QUOTES ' ),
+			'whitespace-only mode'      => array( "SET sql_mode = 'ANSI_QUOTES, ,NO_ENGINE_SUBSTITUTION'", ' ' ),
+			'null'                      => array( 'SET sql_mode = NULL', 'NULL' ),
+			'negative bitmap'           => array( 'SET sql_mode = -1', '-1' ),
+			'unsupported bitmap bit'    => array( "SET sql_mode = $unknown_sql_mode_bit", (string) $unknown_sql_mode_bit ),
+		);
+	}
+
+	public function testSqlModeAllowsEmptyListComponents() {
+		$this->assertQuery( "SET sql_mode = ',,,,ONLY_FULL_GROUP_BY,,,'" );
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'ONLY_FULL_GROUP_BY', $this->last_result[0]->mode );
+	}
+
+	public function testSqlModeIgnoresSpacesAtEndOfValue() {
+		$this->assertQuery( "SET sql_mode = 'ONLY_FULL_GROUP_BY   '" );
+
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( 'ONLY_FULL_GROUP_BY', $this->last_result[0]->mode );
+
+		$this->assertQuery( "SET sql_mode = '   '" );
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$this->assertSame( '', $this->last_result[0]->mode );
+	}
+
+	public function testSqlModeRejectsIncorrectValueType() {
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
+		$this->expectExceptionCode( '42000' );
+		$this->expectExceptionMessage(
+			"SQLSTATE[42000]: Syntax error or access violation: 1232 Incorrect argument type to variable 'sql_mode'"
+		);
+
+		$this->query( 'SET sql_mode = 0.5' );
+	}
+
 	public function testAutoIncrementZeroAdvancesSequenceByDefault() {
 		// Default SQL modes do not include NO_AUTO_VALUE_ON_ZERO.
 		// Values like 0 and '0' should behave like NULL and advance the sequence.
@@ -2915,6 +3195,77 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 		$results = $this->last_result;
 		$this->assertCount( 1, $results );
 		$this->assertEquals( 1, $results[0]->ID );
+	}
+
+	public function testDoubleQuotesAreStringLiteralsByDefault() {
+		$this->assertQuery( 'SELECT "hello" AS greeting;' );
+		$results = $this->last_result;
+		$this->assertCount( 1, $results );
+		$this->assertEquals( 'hello', $results[0]->greeting );
+	}
+
+	public function testAnsiQuotesTreatsDoubleQuotesAsIdentifiers() {
+		$this->assertQuery( "SET sql_mode = 'ANSI_QUOTES'" );
+
+		$this->assertQuery(
+			"INSERT INTO _options (option_name, option_value) VALUES ('alpha', 'one');"
+		);
+
+		$this->assertQuery( 'SELECT "option_name" AS "name" FROM _options WHERE "option_value" = \'one\';' );
+		$results = $this->last_result;
+		$this->assertCount( 1, $results );
+		$this->assertEquals( 'alpha', $results[0]->name );
+	}
+
+	public function testAnsiQuotesAllowsDoubleQuotedIdentifiersInDdl() {
+		$this->assertQuery( "SET sql_mode = 'ANSI_QUOTES'" );
+
+		// Double quotes within the column name are escaped by doubling them.
+		$this->assertQuery( 'CREATE TABLE "table with spaces" ("column with ""quotes"" in name" INTEGER);' );
+		$this->assertQuery( 'INSERT INTO "table with spaces" ("column with ""quotes"" in name") VALUES (42);' );
+		$this->assertQuery( 'SELECT "column with ""quotes"" in name" FROM "table with spaces";' );
+
+		$results = $this->last_result;
+		$this->assertCount( 1, $results );
+		$this->assertEquals( 42, $results[0]->{'column with "quotes" in name'} );
+	}
+
+	public function testCompositeAnsiModeEnablesAnsiQuotes() {
+		$this->assertQuery( "SET sql_mode = 'ANSI'" );
+
+		$this->assertQuery(
+			"INSERT INTO _options (option_name, option_value) VALUES ('alpha', 'one');"
+		);
+
+		$this->assertQuery( 'SELECT "option_name" AS "name" FROM _options WHERE "option_value" = \'one\';' );
+		$results = $this->last_result;
+		$this->assertCount( 1, $results );
+		$this->assertEquals( 'alpha', $results[0]->name );
+	}
+
+	public function testCompositeAnsiModeExpandsToComponentModes() {
+		$this->assertQuery( "SET sql_mode = 'ANSI'" );
+
+		// The composite ANSI mode is retained alongside its component modes.
+		$this->assertTrue( $this->engine->is_sql_mode_active( 'ANSI' ) );
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$results = $this->last_result;
+		$this->assertSame(
+			'REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ONLY_FULL_GROUP_BY,ANSI',
+			$results[0]->mode
+		);
+	}
+
+	public function testCompositeAnsiModeExpandsAlongsideOtherModes() {
+		$this->assertQuery( "SET sql_mode = 'NO_ENGINE_SUBSTITUTION,STRICT_ALL_TABLES,ANSI'" );
+
+		// The expanded modes are returned in MySQL's canonical bitmask order.
+		$this->assertQuery( 'SELECT @@sql_mode AS mode;' );
+		$results = $this->last_result;
+		$this->assertSame(
+			'REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ONLY_FULL_GROUP_BY,ANSI,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION',
+			$results[0]->mode
+		);
 	}
 
 	public function testCaseInsensitiveSelect() {
@@ -3537,7 +3888,14 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 	public function testShowVarianles(): void {
 		$this->assertQuery( 'SHOW VARIABLES' );
 		$this->assertQuery( "SHOW VARIABLES LIKE 'version'" );
+		$this->assertSame( 'version', $this->last_result[0]->Variable_name );
+		$this->assertSame( '8.0.38-mysql-on-sqlite-' . SQLITE_DRIVER_VERSION, $this->last_result[0]->Value );
+		$this->assertQuery( "SHOW VARIABLES LIKE 'version_comment'" );
+		$this->assertSame( 'version_comment', $this->last_result[0]->Variable_name );
+		$this->assertSame( 'MySQL on SQLite', $this->last_result[0]->Value );
 		$this->assertQuery( "SHOW VARIABLES WHERE Variable_name = 'version'" );
+		$this->assertSame( 'version', $this->last_result[0]->Variable_name );
+		$this->assertSame( '8.0.38-mysql-on-sqlite-' . SQLITE_DRIVER_VERSION, $this->last_result[0]->Value );
 		$this->assertQuery( 'SHOW GLOBAL VARIABLES' );
 		$this->assertQuery( 'SHOW SESSION VARIABLES' );
 	}
@@ -3700,7 +4058,7 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 		// SHOW VARIABLES
 		$this->assertQuery( 'SHOW VARIABLES' );
 		$result = $this->assertQuery( 'SELECT FOUND_ROWS()' );
-		$this->assertSame( '0', $result[0]->{'FOUND_ROWS()'} );
+		$this->assertSame( '2', $result[0]->{'FOUND_ROWS()'} );
 	}
 
 	public function testComplexSelectBasedOnDates() {
@@ -4748,10 +5106,10 @@ QUERY
 		);
 
 		$this->assertQuery( "INSERT INTO t (name) VALUES ('a')" );
-		$this->assertEquals( 1, $this->engine->get_insert_id() );
+		$this->assertSame( '1', $this->engine->lastInsertId() );
 
 		$this->assertQuery( "INSERT INTO t (name) VALUES ('b')" );
-		$this->assertEquals( 2, $this->engine->get_insert_id() );
+		$this->assertSame( '2', $this->engine->lastInsertId() );
 	}
 
 	public function testCharLength(): void {
@@ -5128,7 +5486,7 @@ QUERY
 	 * @dataProvider getReservedPrefixTestData
 	 */
 	public function testReservedPrefix( string $query, string $error ): void {
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( $error );
 		$this->assertQuery( $query );
 	}
@@ -5167,7 +5525,7 @@ QUERY
 	 */
 	public function testInformationSchemaIsReadonly( string $query ): void {
 		$this->assertQuery( 'CREATE TABLE tables (id INT)' );
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( "Access denied for user 'root'@'%' to database 'information_schema'" );
 		$this->assertQuery( $query );
 	}
@@ -5199,7 +5557,7 @@ QUERY
 	 */
 	public function testInformationSchemaIsReadonlyWithUse( string $query ): void {
 		$this->assertQuery( 'CREATE TABLE tables (id INT)' );
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( "Access denied for user 'root'@'%' to database 'information_schema'" );
 		$this->assertQuery( 'USE information_schema' );
 		$this->assertQuery( $query );
@@ -5271,7 +5629,7 @@ QUERY
 		$this->assertEquals( 'a', $result[0]->Field );
 
 		// Second DROP TABLE removes the standard table.
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( "Table 'wp.t' doesn't exist" );
 		$this->assertQuery( 'DROP TABLE t' );
 		$result = $this->assertQuery( 'SHOW COLUMNS FROM t' );
@@ -5337,7 +5695,7 @@ QUERY
 		$exception = null;
 		try {
 			$this->assertQuery( 'INSERT INTO t1 (id) VALUES (1)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -5351,7 +5709,7 @@ QUERY
 		$exception = null;
 		try {
 			$this->assertQuery( 'INSERT INTO t2 (id, value) VALUES (1, NULL)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -5366,7 +5724,7 @@ QUERY
 		try {
 			$this->assertQuery( "INSERT INTO t3 (id, value) VALUES (1, 'initial-value')" );
 			$this->assertQuery( 'UPDATE t3 SET value = NULL WHERE id = 1' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -5391,7 +5749,7 @@ QUERY
 		$exception = null;
 		try {
 			$this->assertQuery( 'INSERT INTO t2 (id, value) VALUES (1, NULL)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -5406,7 +5764,7 @@ QUERY
 		try {
 			$this->assertQuery( "INSERT INTO t3 (id, value) VALUES (1, 'initial-value')" );
 			$this->assertQuery( 'UPDATE t3 SET value = NULL WHERE id = 1' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -5483,7 +5841,7 @@ QUERY
 		$exception = null;
 		try {
 			$this->assertQuery( 'INSERT INTO t2 (id, value) VALUES (1, NULL)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -5516,7 +5874,7 @@ QUERY
 		$exception = null;
 		try {
 			$this->assertQuery( 'INSERT INTO t2 (id, value) VALUES (1, NULL)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -5875,6 +6233,7 @@ QUERY
 			"SET sql_mode = 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES'",
 			"SET sql_mode = 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES '",
 			"SET sql_mode = 'no_backslash_escapes'",
+			'SET sql_mode = ' . self::SQL_MODE_NO_BACKSLASH_ESCAPES,
 		);
 
 		foreach ( $queries as $query ) {
@@ -5883,7 +6242,7 @@ QUERY
 			try {
 				$this->assertQuery( $query );
 				$this->fail( 'Expected NO_BACKSLASH_ESCAPES to be rejected.' );
-			} catch ( WP_SQLite_Driver_Exception $e ) {
+			} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 				$this->assertSame(
 					"MySQL query not supported. Cause: SQL mode 'NO_BACKSLASH_ESCAPES'",
 					$e->getMessage()
@@ -5896,7 +6255,7 @@ QUERY
 	}
 
 	public function testMultiQueryNotSupported(): void {
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'Multi-query is not supported.' );
 		$this->assertQuery( 'SELECT 1; SELECT 2' );
 	}
@@ -5906,11 +6265,11 @@ QUERY
 		try {
 			$this->assertQuery( 'CREATE TABLE t (id INT)' );
 			$this->assertQuery( 'CREATE TABLE t (id INT)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42S01]: Base table or view already exists: 1050 Table 't' already exists", $exception->getMessage() );
 		$this->assertSame( '42S01', $exception->getCode() );
 	}
@@ -5919,11 +6278,11 @@ QUERY
 		$exception = null;
 		try {
 			$this->assertQuery( 'CREATE TABLE t (col INT, col INT)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42S21]: Column already exists: 1060 Duplicate column name 'col'", $exception->getMessage() );
 		$this->assertSame( '42S21', $exception->getCode() );
 	}
@@ -5932,26 +6291,26 @@ QUERY
 		$exception = null;
 		try {
 			$this->assertQuery( 'CREATE TABLE t (id1 INT, id2 INT, INDEX idx (id1), INDEX idx (id2))' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42000]: Syntax error or access violation: 1061 Duplicate key name 'idx'", $exception->getMessage() );
-		$this->assertSame( '42S21', $exception->getCode() );
+		$this->assertSame( '42000', $exception->getCode() );
 	}
 
 	public function testCreateTableDuplicateKeyNameWithUnique(): void {
 		$exception = null;
 		try {
 			$this->assertQuery( 'CREATE TABLE t (id1 INT, id2 INT, INDEX idx (id1), UNIQUE idx (id2))' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42000]: Syntax error or access violation: 1061 Duplicate key name 'idx'", $exception->getMessage() );
-		$this->assertSame( '42S21', $exception->getCode() );
+		$this->assertSame( '42000', $exception->getCode() );
 	}
 
 	public function testCreateTableDuplicateKeyNameWithPrimaryKey(): void {
@@ -5964,11 +6323,11 @@ QUERY
 		try {
 			$this->assertQuery( 'CREATE TABLE t (col INT)' );
 			$this->assertQuery( 'ALTER TABLE t ADD COLUMN col INT' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42S21]: Column already exists: 1060 Duplicate column name 'col'", $exception->getMessage() );
 		$this->assertSame( '42S21', $exception->getCode() );
 	}
@@ -5978,11 +6337,11 @@ QUERY
 		try {
 			$this->assertQuery( 'CREATE TABLE t (id INT)' );
 			$this->assertQuery( 'ALTER TABLE t ADD COLUMN col INT, ADD COLUMN col INT' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42S21]: Column already exists: 1060 Duplicate column name 'col'", $exception->getMessage() );
 		$this->assertSame( '42S21', $exception->getCode() );
 	}
@@ -5992,13 +6351,13 @@ QUERY
 		try {
 			$this->assertQuery( 'CREATE TABLE t (id INT, INDEX idx (id))' );
 			$this->assertQuery( 'ALTER TABLE t ADD INDEX idx (id)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42000]: Syntax error or access violation: 1061 Duplicate key name 'idx'", $exception->getMessage() );
-		$this->assertSame( '42S21', $exception->getCode() );
+		$this->assertSame( '42000', $exception->getCode() );
 	}
 
 	public function testAlterTableDuplicateKeyNameWithMultipleOperations(): void {
@@ -6006,13 +6365,13 @@ QUERY
 		try {
 			$this->assertQuery( 'CREATE TABLE t (id INT)' );
 			$this->assertQuery( 'ALTER TABLE t ADD INDEX idx (id), ADD INDEX idx (id)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42000]: Syntax error or access violation: 1061 Duplicate key name 'idx'", $exception->getMessage() );
-		$this->assertSame( '42S21', $exception->getCode() );
+		$this->assertSame( '42000', $exception->getCode() );
 	}
 
 	public function testAlterTableDuplicateKeyNameWithUnique(): void {
@@ -6020,13 +6379,13 @@ QUERY
 		try {
 			$this->assertQuery( 'CREATE TABLE t (id INT, INDEX idx (id))' );
 			$this->assertQuery( 'ALTER TABLE t ADD UNIQUE idx (id)' );
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 
-		$this->assertInstanceOf( WP_SQLite_Driver_Exception::class, $exception );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
 		$this->assertSame( "SQLSTATE[42000]: Syntax error or access violation: 1061 Duplicate key name 'idx'", $exception->getMessage() );
-		$this->assertSame( '42S21', $exception->getCode() );
+		$this->assertSame( '42000', $exception->getCode() );
 	}
 
 	public function testConstraintName(): void {
@@ -6424,19 +6783,19 @@ QUERY
 	}
 
 	public function testAliasesMustBeAscii(): void {
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'The SQLite driver only supports ASCII characters in identifiers.' );
 		$this->assertQuery( 'SELECT 123 AS `ńôñ-ášçíì`' );
 	}
 
 	public function testTableNamesMustBeAscii(): void {
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'The SQLite driver only supports ASCII characters in identifiers.' );
 		$this->assertQuery( 'CREATE TABLE `ńôñ-ášçíì` (id INT)' );
 	}
 
 	public function testColumnNamesMustBeAscii(): void {
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'The SQLite driver only supports ASCII characters in identifiers.' );
 		$this->assertQuery( 'CREATE TABLE t (`ńôñ-ášçíì` INT)' );
 	}
@@ -6663,7 +7022,7 @@ QUERY
 		$this->assertQuery( 'CREATE TABLE t (id INT, val1 INT, val2 INT)' );
 		$this->assertQuery( 'CREATE INDEX idx_value ON t (val1)' );
 
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( "1061 Duplicate key name 'idx_value'" );
 
 		$this->assertQuery( 'CREATE INDEX idx_value ON t (val2)' );
@@ -6672,7 +7031,7 @@ QUERY
 	public function testCreateIndexOnNonExistentColumn(): void {
 		$this->assertQuery( 'CREATE TABLE t (id INT)' );
 
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( "SQLSTATE[42000]: Syntax error or access violation: 1072 Key column 'val' doesn't exist in table" );
 
 		$this->assertQuery( 'CREATE INDEX idx_value ON t (val)' );
@@ -6947,15 +7306,15 @@ END;
 	}
 
 	public function testDatabaseNameEmpty(): void {
-		$pdo_class = PHP_VERSION_ID >= 80400 ? PDO\SQLite::class : PDO::class;
+		$pdo_class = PHP_VERSION_ID >= 80400 ? Pdo\Sqlite::class : PDO::class;
 		$pdo       = new $pdo_class( 'sqlite::memory:' );
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'The database name cannot be empty.' );
 		new WP_MySQL_On_SQLite(
 			'mysql-on-sqlite:dbname=',
 			null,
 			null,
-			array( 'pdo' => $pdo )
+			array( 'sqlite_pdo' => $pdo )
 		);
 	}
 
@@ -7004,10 +7363,10 @@ END;
 
 	public function testBuiltInSystemVariables(): void {
 		$result = $this->assertQuery( 'SELECT @@version' );
-		$this->assertSame( '8.0.38', $result[0]->{'@@version'} );
+		$this->assertSame( '8.0.38-mysql-on-sqlite-' . SQLITE_DRIVER_VERSION, $result[0]->{'@@version'} );
 
 		$result = $this->assertQuery( 'SELECT @@version_comment' );
-		$this->assertSame( 'MySQL Community Server - GPL', $result[0]->{'@@version_comment'} );
+		$this->assertSame( 'MySQL on SQLite', $result[0]->{'@@version_comment'} );
 	}
 
 	public function testSessionSystemVariables(): void {
@@ -7248,13 +7607,13 @@ END;
 	}
 
 	public function testLockNonExistentTableForRead(): void {
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( "Table 'wp.t' doesn't exist" );
 		$this->assertQuery( 'LOCK TABLES t READ' );
 	}
 
 	public function testLockNonExistentTableForWrite(): void {
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( "Table 'wp.t' doesn't exist" );
 		$this->assertQuery( 'LOCK TABLES t WRITE' );
 	}
@@ -7263,7 +7622,7 @@ END;
 		$this->assertQuery( 'CREATE TABLE t1 (id INT)' );
 		$this->assertQuery( 'CREATE TABLE t3 (id INT)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( "Table 'wp.t2' doesn't exist" );
 		$this->assertQuery( 'LOCK TABLES t1 READ, t2 READ, t3 WRITE' );
 	}
@@ -7457,7 +7816,7 @@ END;
 		$this->assertQuery( 'CREATE TABLE t1 (id INT, name TEXT)' );
 		$this->assertQuery( 'CREATE TABLE t2 (id INT, name TEXT)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'ambiguous column name: name' );
 		$this->assertQuery( 'SELECT t1.name, t2.name FROM t1 JOIN t2 ON t2.id = t1.id ORDER BY name DESC' );
 	}
@@ -7467,7 +7826,7 @@ END;
 		$this->assertQuery( 'CREATE TABLE t1 (id INT, name TEXT)' );
 		$this->assertQuery( 'CREATE TABLE t2 (id INT, name TEXT)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'ambiguous column name: name' );
 		$this->assertQuery( 'SELECT 1 FROM t1 JOIN t2 ON t2.id = t1.id ORDER BY name' );
 	}
@@ -7519,7 +7878,7 @@ END;
 		$this->assertQuery( 'CREATE TABLE t1 (id INT, name TEXT)' );
 		$this->assertQuery( 'CREATE TABLE t2 (id INT, name TEXT)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'ambiguous column name: name' );
 		$this->assertQuery( 'SELECT t1.name, t2.name FROM t1 JOIN t2 ON t2.id = t1.id GROUP BY name' );
 	}
@@ -7528,7 +7887,7 @@ END;
 		$this->assertQuery( 'CREATE TABLE t1 (id INT, name TEXT)' );
 		$this->assertQuery( 'CREATE TABLE t2 (id INT, name TEXT)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'ambiguous column name: name' );
 		$this->assertQuery( 'SELECT 1 FROM t1 JOIN t2 ON t2.id = t1.id GROUP BY name' );
 	}
@@ -7568,7 +7927,7 @@ END;
 		$this->assertQuery( 'CREATE TABLE t1 (id INT, name TEXT)' );
 		$this->assertQuery( 'CREATE TABLE t2 (id INT, name TEXT)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'ambiguous column name: name' );
 		$this->assertQuery( 'SELECT t1.name, t2.name FROM t1 JOIN t2 ON t2.id = t1.id HAVING name' );
 	}
@@ -7577,13 +7936,13 @@ END;
 		$this->assertQuery( 'CREATE TABLE t1 (id INT, name TEXT)' );
 		$this->assertQuery( 'CREATE TABLE t2 (id INT, name TEXT)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'ambiguous column name: name' );
 		$this->assertQuery( 'SELECT 1 FROM t1 JOIN t2 ON t2.id = t1.id HAVING name' );
 	}
 
 	public function testRollbackNonExistentTransactionSavepoint(): void {
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'no such savepoint: sp1' );
 		$this->assertQuery( 'ROLLBACK TO SAVEPOINT sp1' );
 	}
@@ -7594,7 +7953,7 @@ END;
 		$this->assertQuery( 'INSERT INTO t1 (id) VALUES (1)' );
 		$this->assertQuery( 'INSERT INTO t2 (id) VALUES (1)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'SQLSTATE[23000]: Integrity constraint violation: 19 FOREIGN KEY constraint failed' );
 		$this->assertQuery( 'UPDATE t1 SET id = 2 WHERE id = 1' );
 	}
@@ -7605,7 +7964,7 @@ END;
 		$this->assertQuery( 'INSERT INTO t1 (id) VALUES (1)' );
 		$this->assertQuery( 'INSERT INTO t2 (id) VALUES (1)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'SQLSTATE[23000]: Integrity constraint violation: 19 FOREIGN KEY constraint failed' );
 		$this->assertQuery( 'UPDATE t1 SET id = 2 WHERE id = 1' );
 	}
@@ -7650,7 +8009,7 @@ END;
 		$this->assertQuery( 'INSERT INTO t1 (id) VALUES (1)' );
 		$this->assertQuery( 'INSERT INTO t2 (id) VALUES (1)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'SQLSTATE[23000]: Integrity constraint violation: 19 FOREIGN KEY constraint failed' );
 		$this->assertQuery( 'DELETE FROM t1 WHERE id = 1' );
 	}
@@ -7661,7 +8020,7 @@ END;
 		$this->assertQuery( 'INSERT INTO t1 (id) VALUES (1)' );
 		$this->assertQuery( 'INSERT INTO t2 (id) VALUES (1)' );
 
-		$this->expectException( 'WP_SQLite_Driver_Exception' );
+		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
 		$this->expectExceptionMessage( 'SQLSTATE[23000]: Integrity constraint violation: 19 FOREIGN KEY constraint failed' );
 		$this->assertQuery( 'DELETE FROM t1 WHERE id = 1' );
 	}
@@ -7957,9 +8316,9 @@ END;
 		$this->assertQuery( "INSERT INTO t VALUES (1, 'name', 1.1, B'01101001')" );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 4, $this->engine->get_last_column_count() );
+		$this->assertEquals( 4, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 		$this->assertCount( 4, $column_info );
 
 		$this->assertSame(
@@ -8064,9 +8423,9 @@ END;
 		$this->assertQuery( 'INSERT INTO t VALUES (1, "slug", 1)' );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 3, $this->engine->get_last_column_count() );
+		$this->assertEquals( 3, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -8147,9 +8506,9 @@ END;
 		$this->assertQuery( 'INSERT INTO t VALUES (0, 1, 2, 3, 4, 5, 6)' );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 7, $this->engine->get_last_column_count() );
+		$this->assertEquals( 7, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -8298,9 +8657,9 @@ END;
 		$this->assertQuery( 'INSERT INTO t VALUES (1, 2, 3, 4, 5)' );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 5, $this->engine->get_last_column_count() );
+		$this->assertEquals( 5, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -8415,9 +8774,9 @@ END;
 		$this->assertQuery( 'INSERT INTO t VALUES (1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7)' );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 7, $this->engine->get_last_column_count() );
+		$this->assertEquals( 7, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -8572,9 +8931,9 @@ END;
 		$this->assertQuery( 'INSERT INTO t VALUES ("a", "b", "c", "d", "e", "f", "g", "h", "a", "b", "{}")' );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 11, $this->engine->get_last_column_count() );
+		$this->assertEquals( 11, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -8795,9 +9154,9 @@ END;
 		$this->assertQuery( 'INSERT INTO t VALUES ("2024-01-01", "12:00:00", "2024-01-01 12:00:00", "2024-01-01 12:00:00", 2024)' );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 5, $this->engine->get_last_column_count() );
+		$this->assertEquals( 5, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -8911,9 +9270,9 @@ END;
 		$this->assertQuery( "INSERT INTO t VALUES (B'01000001', B'01101001', B'10101010', B'01010101', B'10000000', B'11111111')" );
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 6, $this->engine->get_last_column_count() );
+		$this->assertEquals( 6, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -9060,9 +9419,9 @@ END;
 		);
 
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 9, $this->engine->get_last_column_count() );
+		$this->assertEquals( 9, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -9260,9 +9619,9 @@ END;
 				(SELECT 1) AS col_expr_20
 			FROM t"
 		);
-		$this->assertEquals( 20, $this->engine->get_last_column_count() );
+		$this->assertEquals( 20, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 
 		$this->assertSame(
 			array(
@@ -9659,9 +10018,9 @@ END;
 				CASE WHEN col_int < 5 THEN 'string' ELSE 123 END AS col_expr_4
 			FROM t"
 		);
-		$this->assertEquals( 16, $this->engine->get_last_column_count() );
+		$this->assertEquals( 16, $this->last_statement->columnCount() );
 
-		$column_info = $this->engine->get_last_column_meta();
+		$column_info = $this->getLastColumnMeta();
 		$this->assertCount( 16, $column_info );
 
 		$this->assertSame(
@@ -9967,8 +10326,8 @@ END;
 
 		$this->assertQuery( 'CREATE TABLE t ( id INT )' );
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertEquals( 1, $this->engine->get_last_column_count() );
-		$column_info = $this->engine->get_last_column_meta();
+		$this->assertEquals( 1, $this->last_statement->columnCount() );
+		$column_info = $this->getLastColumnMeta();
 		$this->assertCount( 1, $column_info );
 		$this->assertSame(
 			array(
@@ -10023,7 +10382,7 @@ END;
 				VALUES (0, 'test', 50, '2025-01-01 12:00:00', '2025-01-02 12:00:00', '{\"key\":\"value\"}')
 			"
 			);
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -10040,7 +10399,7 @@ END;
 				VALUES (1, '', 50, '2025-01-01 12:00:00', '2025-01-02 12:00:00', '{\"key\":\"value\"}')
 			"
 			);
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -10057,7 +10416,7 @@ END;
 				VALUES (1, 'test', 100, '2025-01-01 12:00:00', '2025-01-02 12:00:00', '{\"key\":\"value\"}')
 			"
 			);
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -10074,7 +10433,7 @@ END;
 				VALUES (1, 'test', 50, '2025-01-01 12:00:00', '2025-01-02 12:00:00', 'invalid JSON')
 			"
 			);
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -10091,7 +10450,7 @@ END;
 				VALUES (11, 'test', 50, '2025-01-01 12:00:00', '2025-01-02 12:00:00', '{\"key\":\"value\"}')
 			"
 			);
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -10108,7 +10467,7 @@ END;
 				VALUES (1, 'test', 50, '2025-01-02 12:00:00', '2025-01-01 12:00:00', '{\"key\":\"value\"}')
 			"
 			);
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -10125,7 +10484,7 @@ END;
 				VALUES (1, 'test', 50, '2025-01-01 12:00:00', '2025-01-02 12:00:00', '{\"key\":\"a-very-long-value\"}')
 			"
 			);
-		} catch ( WP_SQLite_Driver_Exception $e ) {
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
 			$exception = $e;
 		}
 		$this->assertNotNull( $exception );
@@ -10198,7 +10557,7 @@ END;
 		$this->assertCount( 1, $result );
 
 		// Insert invalid data.
-		$this->expectException( WP_SQLite_Driver_Exception::class );
+		$this->expectException( WP_MySQL_On_SQLite_Exception::class );
 		$this->expectExceptionMessage( 'SQLSTATE[23000]: Integrity constraint violation: 19 CHECK constraint failed: c' );
 		$this->assertQuery( 'INSERT INTO t (id) VALUES (0)' );
 	}
@@ -10938,242 +11297,242 @@ END;
 
 		// SELECT
 		$this->assertQuery( 'SELECT * FROM t' );
-		$this->assertSame( 1, $this->engine->get_last_column_count() );
-		$this->assertSame( 'id', $this->engine->get_last_column_meta()[0]['name'] );
+		$this->assertSame( 1, $this->last_statement->columnCount() );
+		$this->assertSame( 'id', $this->last_statement->getColumnMeta( 0 )['name'] );
 
 		// SHOW COLLATION
 		$this->assertQuery( 'SHOW COLLATION' );
-		$this->assertSame( 7, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Collation', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Charset', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Id', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Default', $this->engine->get_last_column_meta()[3]['name'] );
-		$this->assertSame( 'Compiled', $this->engine->get_last_column_meta()[4]['name'] );
-		$this->assertSame( 'Sortlen', $this->engine->get_last_column_meta()[5]['name'] );
-		$this->assertSame( 'Pad_attribute', $this->engine->get_last_column_meta()[6]['name'] );
+		$this->assertSame( 7, $this->last_statement->columnCount() );
+		$this->assertSame( 'Collation', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Charset', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Id', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Default', $this->last_statement->getColumnMeta( 3 )['name'] );
+		$this->assertSame( 'Compiled', $this->last_statement->getColumnMeta( 4 )['name'] );
+		$this->assertSame( 'Sortlen', $this->last_statement->getColumnMeta( 5 )['name'] );
+		$this->assertSame( 'Pad_attribute', $this->last_statement->getColumnMeta( 6 )['name'] );
 
 		// SHOW DATABASES
 		$this->assertQuery( 'SHOW DATABASES' );
-		$this->assertSame( 1, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Database', $this->engine->get_last_column_meta()[0]['name'] );
+		$this->assertSame( 1, $this->last_statement->columnCount() );
+		$this->assertSame( 'Database', $this->last_statement->getColumnMeta( 0 )['name'] );
 
 		// SHOW CREATE TABLE
 		$this->assertQuery( 'SHOW CREATE TABLE t' );
-		$this->assertSame( 2, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Table', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Create Table', $this->engine->get_last_column_meta()[1]['name'] );
+		$this->assertSame( 2, $this->last_statement->columnCount() );
+		$this->assertSame( 'Table', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Create Table', $this->last_statement->getColumnMeta( 1 )['name'] );
 
 		// SHOW TABLE STATUS
 		$this->assertQuery( 'SHOW TABLE STATUS' );
-		$this->assertSame( 18, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Name', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Engine', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Version', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Row_format', $this->engine->get_last_column_meta()[3]['name'] );
-		$this->assertSame( 'Rows', $this->engine->get_last_column_meta()[4]['name'] );
-		$this->assertSame( 'Avg_row_length', $this->engine->get_last_column_meta()[5]['name'] );
-		$this->assertSame( 'Data_length', $this->engine->get_last_column_meta()[6]['name'] );
-		$this->assertSame( 'Max_data_length', $this->engine->get_last_column_meta()[7]['name'] );
-		$this->assertSame( 'Index_length', $this->engine->get_last_column_meta()[8]['name'] );
-		$this->assertSame( 'Data_free', $this->engine->get_last_column_meta()[9]['name'] );
-		$this->assertSame( 'Auto_increment', $this->engine->get_last_column_meta()[10]['name'] );
-		$this->assertSame( 'Create_time', $this->engine->get_last_column_meta()[11]['name'] );
-		$this->assertSame( 'Update_time', $this->engine->get_last_column_meta()[12]['name'] );
-		$this->assertSame( 'Check_time', $this->engine->get_last_column_meta()[13]['name'] );
-		$this->assertSame( 'Collation', $this->engine->get_last_column_meta()[14]['name'] );
-		$this->assertSame( 'Checksum', $this->engine->get_last_column_meta()[15]['name'] );
-		$this->assertSame( 'Create_options', $this->engine->get_last_column_meta()[16]['name'] );
-		$this->assertSame( 'Comment', $this->engine->get_last_column_meta()[17]['name'] );
+		$this->assertSame( 18, $this->last_statement->columnCount() );
+		$this->assertSame( 'Name', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Engine', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Version', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Row_format', $this->last_statement->getColumnMeta( 3 )['name'] );
+		$this->assertSame( 'Rows', $this->last_statement->getColumnMeta( 4 )['name'] );
+		$this->assertSame( 'Avg_row_length', $this->last_statement->getColumnMeta( 5 )['name'] );
+		$this->assertSame( 'Data_length', $this->last_statement->getColumnMeta( 6 )['name'] );
+		$this->assertSame( 'Max_data_length', $this->last_statement->getColumnMeta( 7 )['name'] );
+		$this->assertSame( 'Index_length', $this->last_statement->getColumnMeta( 8 )['name'] );
+		$this->assertSame( 'Data_free', $this->last_statement->getColumnMeta( 9 )['name'] );
+		$this->assertSame( 'Auto_increment', $this->last_statement->getColumnMeta( 10 )['name'] );
+		$this->assertSame( 'Create_time', $this->last_statement->getColumnMeta( 11 )['name'] );
+		$this->assertSame( 'Update_time', $this->last_statement->getColumnMeta( 12 )['name'] );
+		$this->assertSame( 'Check_time', $this->last_statement->getColumnMeta( 13 )['name'] );
+		$this->assertSame( 'Collation', $this->last_statement->getColumnMeta( 14 )['name'] );
+		$this->assertSame( 'Checksum', $this->last_statement->getColumnMeta( 15 )['name'] );
+		$this->assertSame( 'Create_options', $this->last_statement->getColumnMeta( 16 )['name'] );
+		$this->assertSame( 'Comment', $this->last_statement->getColumnMeta( 17 )['name'] );
 
 		// SHOW TABLES
 		$this->assertQuery( 'SHOW TABLES' );
-		$this->assertSame( 1, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Tables_in_wp', $this->engine->get_last_column_meta()[0]['name'] );
+		$this->assertSame( 1, $this->last_statement->columnCount() );
+		$this->assertSame( 'Tables_in_wp', $this->last_statement->getColumnMeta( 0 )['name'] );
 
 		// SHOW FULL TABLES
 		$this->assertQuery( 'SHOW FULL TABLES' );
-		$this->assertSame( 2, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Tables_in_wp', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Table_type', $this->engine->get_last_column_meta()[1]['name'] );
+		$this->assertSame( 2, $this->last_statement->columnCount() );
+		$this->assertSame( 'Tables_in_wp', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Table_type', $this->last_statement->getColumnMeta( 1 )['name'] );
 
 		// SHOW COLUMNS
 		$this->assertQuery( 'SHOW COLUMNS FROM t' );
-		$this->assertSame( 6, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Field', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Type', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Null', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Key', $this->engine->get_last_column_meta()[3]['name'] );
-		$this->assertSame( 'Default', $this->engine->get_last_column_meta()[4]['name'] );
-		$this->assertSame( 'Extra', $this->engine->get_last_column_meta()[5]['name'] );
+		$this->assertSame( 6, $this->last_statement->columnCount() );
+		$this->assertSame( 'Field', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Type', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Null', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Key', $this->last_statement->getColumnMeta( 3 )['name'] );
+		$this->assertSame( 'Default', $this->last_statement->getColumnMeta( 4 )['name'] );
+		$this->assertSame( 'Extra', $this->last_statement->getColumnMeta( 5 )['name'] );
 
 		// SHOW INDEX
 		$this->assertQuery( 'SHOW INDEX FROM t' );
-		$this->assertSame( 15, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Table', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Non_unique', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Key_name', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Seq_in_index', $this->engine->get_last_column_meta()[3]['name'] );
-		$this->assertSame( 'Column_name', $this->engine->get_last_column_meta()[4]['name'] );
-		$this->assertSame( 'Collation', $this->engine->get_last_column_meta()[5]['name'] );
-		$this->assertSame( 'Cardinality', $this->engine->get_last_column_meta()[6]['name'] );
-		$this->assertSame( 'Sub_part', $this->engine->get_last_column_meta()[7]['name'] );
-		$this->assertSame( 'Packed', $this->engine->get_last_column_meta()[8]['name'] );
-		$this->assertSame( 'Null', $this->engine->get_last_column_meta()[9]['name'] );
-		$this->assertSame( 'Index_type', $this->engine->get_last_column_meta()[10]['name'] );
-		$this->assertSame( 'Comment', $this->engine->get_last_column_meta()[11]['name'] );
-		$this->assertSame( 'Index_comment', $this->engine->get_last_column_meta()[12]['name'] );
-		$this->assertSame( 'Visible', $this->engine->get_last_column_meta()[13]['name'] );
-		$this->assertSame( 'Expression', $this->engine->get_last_column_meta()[14]['name'] );
+		$this->assertSame( 15, $this->last_statement->columnCount() );
+		$this->assertSame( 'Table', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Non_unique', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Key_name', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Seq_in_index', $this->last_statement->getColumnMeta( 3 )['name'] );
+		$this->assertSame( 'Column_name', $this->last_statement->getColumnMeta( 4 )['name'] );
+		$this->assertSame( 'Collation', $this->last_statement->getColumnMeta( 5 )['name'] );
+		$this->assertSame( 'Cardinality', $this->last_statement->getColumnMeta( 6 )['name'] );
+		$this->assertSame( 'Sub_part', $this->last_statement->getColumnMeta( 7 )['name'] );
+		$this->assertSame( 'Packed', $this->last_statement->getColumnMeta( 8 )['name'] );
+		$this->assertSame( 'Null', $this->last_statement->getColumnMeta( 9 )['name'] );
+		$this->assertSame( 'Index_type', $this->last_statement->getColumnMeta( 10 )['name'] );
+		$this->assertSame( 'Comment', $this->last_statement->getColumnMeta( 11 )['name'] );
+		$this->assertSame( 'Index_comment', $this->last_statement->getColumnMeta( 12 )['name'] );
+		$this->assertSame( 'Visible', $this->last_statement->getColumnMeta( 13 )['name'] );
+		$this->assertSame( 'Expression', $this->last_statement->getColumnMeta( 14 )['name'] );
 
 		// SHOW GRANTS
 		$this->assertQuery( 'SHOW GRANTS' );
-		$this->assertSame( 1, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Grants for root@%', $this->engine->get_last_column_meta()[0]['name'] );
+		$this->assertSame( 1, $this->last_statement->columnCount() );
+		$this->assertSame( 'Grants for root@%', $this->last_statement->getColumnMeta( 0 )['name'] );
 
 		// SHOW VARIABLES
 		$this->assertQuery( 'SHOW VARIABLES' );
-		$this->assertSame( 2, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Variable_name', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Value', $this->engine->get_last_column_meta()[1]['name'] );
+		$this->assertSame( 2, $this->last_statement->columnCount() );
+		$this->assertSame( 'Variable_name', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Value', $this->last_statement->getColumnMeta( 1 )['name'] );
 
 		// DESCRIBE/EXPLAIN
 		$this->assertQuery( 'DESCRIBE t' );
-		$this->assertSame( 6, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Field', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Type', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Null', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Key', $this->engine->get_last_column_meta()[3]['name'] );
-		$this->assertSame( 'Default', $this->engine->get_last_column_meta()[4]['name'] );
-		$this->assertSame( 'Extra', $this->engine->get_last_column_meta()[5]['name'] );
+		$this->assertSame( 6, $this->last_statement->columnCount() );
+		$this->assertSame( 'Field', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Type', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Null', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Key', $this->last_statement->getColumnMeta( 3 )['name'] );
+		$this->assertSame( 'Default', $this->last_statement->getColumnMeta( 4 )['name'] );
+		$this->assertSame( 'Extra', $this->last_statement->getColumnMeta( 5 )['name'] );
 
 		// ANALYZE TABLE
 		$this->assertQuery( 'ANALYZE TABLE t' );
-		$this->assertSame( 4, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Table', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Op', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Msg_type', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Msg_text', $this->engine->get_last_column_meta()[3]['name'] );
+		$this->assertSame( 4, $this->last_statement->columnCount() );
+		$this->assertSame( 'Table', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Op', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Msg_type', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Msg_text', $this->last_statement->getColumnMeta( 3 )['name'] );
 
 		// CHECK TABLE
 		$this->assertQuery( 'CHECK TABLE t' );
-		$this->assertSame( 4, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Table', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Op', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Msg_type', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Msg_text', $this->engine->get_last_column_meta()[3]['name'] );
+		$this->assertSame( 4, $this->last_statement->columnCount() );
+		$this->assertSame( 'Table', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Op', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Msg_type', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Msg_text', $this->last_statement->getColumnMeta( 3 )['name'] );
 
 		// OPTIMIZE TABLE
 		$this->assertQuery( 'OPTIMIZE TABLE t' );
-		$this->assertSame( 4, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Table', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Op', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Msg_type', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Msg_text', $this->engine->get_last_column_meta()[3]['name'] );
+		$this->assertSame( 4, $this->last_statement->columnCount() );
+		$this->assertSame( 'Table', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Op', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Msg_type', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Msg_text', $this->last_statement->getColumnMeta( 3 )['name'] );
 
 		// REPAIR TABLE
 		$this->assertQuery( 'REPAIR TABLE t' );
-		$this->assertSame( 4, $this->engine->get_last_column_count() );
-		$this->assertSame( 'Table', $this->engine->get_last_column_meta()[0]['name'] );
-		$this->assertSame( 'Op', $this->engine->get_last_column_meta()[1]['name'] );
-		$this->assertSame( 'Msg_type', $this->engine->get_last_column_meta()[2]['name'] );
-		$this->assertSame( 'Msg_text', $this->engine->get_last_column_meta()[3]['name'] );
+		$this->assertSame( 4, $this->last_statement->columnCount() );
+		$this->assertSame( 'Table', $this->last_statement->getColumnMeta( 0 )['name'] );
+		$this->assertSame( 'Op', $this->last_statement->getColumnMeta( 1 )['name'] );
+		$this->assertSame( 'Msg_type', $this->last_statement->getColumnMeta( 2 )['name'] );
+		$this->assertSame( 'Msg_text', $this->last_statement->getColumnMeta( 3 )['name'] );
 	}
 
 	public function testEmptyColumnMeta(): void {
 		// CREATE TABLE
 		$this->assertQuery( 'CREATE TABLE t (id INT)' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// INSERT
 		$this->assertQuery( 'INSERT INTO t (id) VALUES (1)' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// REPLACE
 		$this->assertQuery( 'UPDATE t SET id = 1' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// DELETE
 		$this->assertQuery( 'DELETE FROM t' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// TRUNCATE TABLE
 		$this->assertQuery( 'TRUNCATE TABLE t' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// START TRANSACTION
 		$this->assertQuery( 'START TRANSACTION' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// COMMIT
 		$this->assertQuery( 'COMMIT' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// ROLLBACK
 		$this->assertQuery( 'ROLLBACK' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// SAVEPOINT
 		$this->assertQuery( 'SAVEPOINT s1' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// ROLLBACK TO SAVEPOINT
 		$this->assertQuery( 'ROLLBACK TO SAVEPOINT s1' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// RELEASE SAVEPOINT
 		$this->assertQuery( 'RELEASE SAVEPOINT s1' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// LOCK TABLE
 		$this->assertQuery( 'LOCK TABLES t READ' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// UNLOCK TABLE
 		$this->assertQuery( 'UNLOCK TABLES' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// ALTER TABLE
 		$this->assertQuery( 'ALTER TABLE t ADD COLUMN name VARCHAR(255)' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// CREATE INDEX
 		$this->assertQuery( 'CREATE INDEX idx_name ON t (name)' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// DROP INDEX
 		$this->assertQuery( 'DROP INDEX idx_name ON t' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// DROP TABLE
 		$this->assertQuery( 'DROP TABLE t' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// USE
 		$this->assertQuery( 'USE wp' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 
 		// SET
 		$this->assertQuery( 'SET @my_var = 1' );
-		$this->assertSame( 0, $this->engine->get_last_column_count() );
-		$this->assertSame( array(), $this->engine->get_last_column_meta() );
+		$this->assertSame( 0, $this->last_statement->columnCount() );
+		$this->assertSame( array(), $this->getLastColumnMeta() );
 	}
 
 	public function testCastValuesOnInsert(): void {
@@ -12322,7 +12681,7 @@ END;
 
 	public function testVersionFunction(): void {
 		$result = $this->query( 'SELECT VERSION()' );
-		$this->assertSame( '8.0.38', $result[0]->{'VERSION()'} );
+		$this->assertSame( '8.0.38-mysql-on-sqlite-' . SQLITE_DRIVER_VERSION, $result[0]->{'VERSION()'} );
 	}
 
 	public function testFromBase64Function(): void {

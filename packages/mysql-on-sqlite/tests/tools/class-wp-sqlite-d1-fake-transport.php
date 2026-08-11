@@ -12,7 +12,10 @@
  *   - No user-defined functions are registered; SQL using them fails.
  *   - Batches execute atomically, rolling back on failure.
  *   - Values round-trip through JSON, reproducing the type coercion of
- *     the HTTP protocol.
+ *     the HTTP protocol. Note that the values are read from PDO SQLite,
+ *     which always stringifies before PHP 8.1; native value types cannot
+ *     be reproduced there. The real transports decode JSON directly and
+ *     are unaffected.
  *   - Reads report accurate column names with zeroed write meta; writes
  *     report accurate meta (changes/last_row_id).
  *
@@ -168,14 +171,40 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 		/*
 		 * Fetch with value stringification disabled, independently of the
 		 * attribute set on the PDO handle: the D1 protocol carries native
-		 * JSON types. The attribute is restored afterwards, so that tests
-		 * can make stringified assertions against the raw handle.
+		 * JSON types. PDO SQLite applies the attribute when rows are fetched,
+		 * not when they are executed, so it must stay disabled until the rows
+		 * have been read. It is restored afterwards, so that tests can make
+		 * stringified assertions against the raw handle.
 		 */
 		$this->pdo->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, false );
 
 		try {
 			$stmt = $this->pdo->prepare( $sql );
 			$stmt->execute( array_values( $params ) );
+
+			/*
+			 * Collect the column names. On PHP < 7.3, PDO SQLite fails
+			 * "getColumnMeta()" for statements with an empty result set (see
+			 * the PHP bug #79664 workarounds in the driver). In that case, the
+			 * fake degrades to placeholder column names: the result has no
+			 * rows, so the names never surface in data, while the column
+			 * count remains accurate — unlike a real D1 proxy, which reports
+			 * the names accurately.
+			 */
+			$columns = array();
+			for ( $i = 0; $i < $stmt->columnCount(); $i++ ) {
+				try {
+					$meta = $stmt->getColumnMeta( $i );
+				} catch ( PDOException $e ) {
+					$meta = false;
+				}
+				$columns[] = false === $meta ? "column$i" : $meta['name'];
+			}
+
+			$rows = array();
+			foreach ( $stmt->fetchAll( PDO::FETCH_NUM ) as $row ) {
+				$rows[] = array_map( array( $this, 'json_round_trip' ), $row );
+			}
 		} catch ( PDOException $e ) {
 			// Reproduce the error shape of the D1 proxy protocol.
 			$message = $e->getMessage();
@@ -193,30 +222,6 @@ class WP_SQLite_D1_Fake_Transport implements WP_SQLite_D1_Transport_Interface {
 		}
 
 		$is_read = 1 === preg_match( '/^\s*(SELECT|PRAGMA|EXPLAIN|WITH)\b/i', $sql );
-
-		/*
-		 * Collect the column names. On PHP < 7.3, PDO SQLite fails
-		 * "getColumnMeta()" for statements with an empty result set (see
-		 * the PHP bug #79664 workarounds in the driver). In that case, the
-		 * fake degrades to placeholder column names: the result has no
-		 * rows, so the names never surface in data, while the column
-		 * count remains accurate — unlike a real D1 proxy, which reports
-		 * the names accurately.
-		 */
-		$columns = array();
-		for ( $i = 0; $i < $stmt->columnCount(); $i++ ) {
-			try {
-				$meta = $stmt->getColumnMeta( $i );
-			} catch ( PDOException $e ) {
-				$meta = false;
-			}
-			$columns[] = false === $meta ? "column$i" : $meta['name'];
-		}
-
-		$rows = array();
-		foreach ( $stmt->fetchAll( PDO::FETCH_NUM ) as $row ) {
-			$rows[] = array_map( array( $this, 'json_round_trip' ), $row );
-		}
 
 		if ( $is_read ) {
 			// As with the D1 proxy, reads report zeroed write meta.

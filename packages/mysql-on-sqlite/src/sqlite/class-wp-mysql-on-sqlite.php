@@ -3,7 +3,30 @@
 /*
  * The SQLite driver uses PDO. Enable PDO function calls:
  * phpcs:disable WordPress.DB.RestrictedClasses.mysql__PDO
+ *
+ * PDO uses camel case naming, enable non-snake case:
+ * phpcs:disable WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid
+ * phpcs:disable WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
+ *
+ * PDO uses $string as a parameter name, enable it:
+ * phpcs:disable Universal.NamingConventions.NoReservedKeywordParameterNames.stringFound
+ *
+ * We conditionally define a trait for PHP-version-specific PDO methods:
+ * phpcs:disable Generic.Files.OneObjectStructurePerFile.MultipleFound
  */
+
+/*
+ * The "PDO::connect()" method in PHP 8.4 uses a "static" return type declaration,
+ * which PHP 7 cannot parse. Therefore, a conditional file import is needed.
+ */
+if ( PHP_VERSION_ID >= 80400 ) {
+	require_once __DIR__ . '/trait-wp-mysql-on-sqlite-pdo-compat-php-84.php';
+} else {
+	/**
+	 * @access private
+	 */
+	trait WP_MySQL_On_SQLite_PDO_Compat {}
+}
 
 /**
  * SQLite driver for MySQL.
@@ -15,10 +38,22 @@
  * The driver requires PDO with the SQLite driver, and the PCRE engine.
  */
 class WP_MySQL_On_SQLite extends PDO {
+	use WP_MySQL_On_SQLite_PDO_Compat;
+
 	/**
 	 * The path to the MySQL SQL grammar file.
 	 */
-	const MYSQL_GRAMMAR_PATH = __DIR__ . '/../mysql/mysql-grammar.php';
+	private const MYSQL_GRAMMAR_PATH = __DIR__ . '/../mysql/mysql-grammar.php';
+
+	/**
+	 * The minimum supported MySQL version.
+	 */
+	private const MINIMUM_MYSQL_VERSION = 50700;
+
+	/**
+	 * The default MySQL version to emulate.
+	 */
+	const DEFAULT_MYSQL_VERSION = 80038;
 
 	/**
 	 * The minimum required version of SQLite.
@@ -31,6 +66,8 @@ class WP_MySQL_On_SQLite extends PDO {
 	/**
 	 * An identifier prefix for internal database objects.
 	 *
+	 * @access private
+	 *
 	 * @TODO: Do not allow accessing objects with this prefix.
 	 */
 	const RESERVED_PREFIX = '_wp_sqlite_';
@@ -40,6 +77,8 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * This special table is used to emulate MySQL global variables and to store
 	 * some internal configuration values.
+	 *
+	 * @access private
 	 */
 	const GLOBAL_VARIABLES_TABLE_NAME = self::RESERVED_PREFIX . 'global_variables';
 
@@ -48,15 +87,80 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * This internal variable is used to store the latest version of the SQLite
 	 * driver that was used to initialize and configure the SQLite database.
+	 *
+	 * @access private
 	 */
 	const DRIVER_VERSION_VARIABLE_NAME = self::RESERVED_PREFIX . 'driver_version';
+
+	/**
+	 * MySQL SQL modes mapped to their bitmask values.
+	 *
+	 * The modes are ordered by their bit position, matching MySQL's canonical
+	 * serialization order.
+	 *
+	 * See:
+	 *   https://github.com/mysql/mysql-server/blob/8.4/sql/system_variables.h
+	 *   https://github.com/mysql/mysql-server/blob/5.7/sql/sys_vars.cc
+	 */
+	private const SQL_MODES = array(
+		'REAL_AS_FLOAT'              => 1 << 0,
+		'PIPES_AS_CONCAT'            => 1 << 1,
+		'ANSI_QUOTES'                => 1 << 2,
+		'IGNORE_SPACE'               => 1 << 3,
+		'NOT_USED'                   => 1 << 4,
+		'ONLY_FULL_GROUP_BY'         => 1 << 5,
+		'NO_UNSIGNED_SUBTRACTION'    => 1 << 6,
+		'NO_DIR_IN_CREATE'           => 1 << 7,
+		'POSTGRESQL'                 => 1 << 8,
+		'ORACLE'                     => 1 << 9,
+		'MSSQL'                      => 1 << 10,
+		'DB2'                        => 1 << 11,
+		'MAXDB'                      => 1 << 12,
+		'NO_KEY_OPTIONS'             => 1 << 13,
+		'NO_TABLE_OPTIONS'           => 1 << 14,
+		'NO_FIELD_OPTIONS'           => 1 << 15,
+		'MYSQL323'                   => 1 << 16,
+		'MYSQL40'                    => 1 << 17,
+		'ANSI'                       => 1 << 18,
+		'NO_AUTO_VALUE_ON_ZERO'      => 1 << 19,
+		'NO_BACKSLASH_ESCAPES'       => 1 << 20,
+		'STRICT_TRANS_TABLES'        => 1 << 21,
+		'STRICT_ALL_TABLES'          => 1 << 22,
+		'NO_ZERO_IN_DATE'            => 1 << 23,
+		'NO_ZERO_DATE'               => 1 << 24,
+		'ALLOW_INVALID_DATES'        => 1 << 25,
+		'ERROR_FOR_DIVISION_BY_ZERO' => 1 << 26,
+		'TRADITIONAL'                => 1 << 27,
+		'NO_AUTO_CREATE_USER'        => 1 << 28,
+		'HIGH_NOT_PRECEDENCE'        => 1 << 29,
+		'NO_ENGINE_SUBSTITUTION'     => 1 << 30,
+		'PAD_CHAR_TO_FULL_LENGTH'    => 1 << 31,
+
+		// Modes below require 64-bit PHP.
+		// TODO: Consider supporting these values on 32-bit PHP as well.
+		'TIME_TRUNCATE_FRACTIONAL'   => 1 << 32,
+	);
+
+	/**
+	 * The default SQL modes shared by MySQL 5.7 and 8.0.
+	 *
+	 * MySQL 5.7 additionally enables NO_AUTO_CREATE_USER.
+	 */
+	private const DEFAULT_SQL_MODES = array(
+		'ERROR_FOR_DIVISION_BY_ZERO',
+		'NO_ENGINE_SUBSTITUTION',
+		'NO_ZERO_DATE',
+		'NO_ZERO_IN_DATE',
+		'ONLY_FULL_GROUP_BY',
+		'STRICT_TRANS_TABLES',
+	);
 
 	/**
 	 * A map of MySQL tokens to SQLite data types.
 	 *
 	 * This is used to translate a MySQL data type to an SQLite data type.
 	 */
-	const DATA_TYPE_MAP = array(
+	private const DATA_TYPE_MAP = array(
 		// Numeric data types:
 		WP_MySQL_Lexer::BIT_SYMBOL                => 'INTEGER',
 		WP_MySQL_Lexer::BOOL_SYMBOL               => 'INTEGER',
@@ -122,7 +226,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * INFORMATION_SCHEMA tables. They keys are MySQL data types normalized
 	 * as they appear in the INFORMATION_SCHEMA. Values are SQLite data types.
 	 */
-	const DATA_TYPE_STRING_MAP = array(
+	private const DATA_TYPE_STRING_MAP = array(
 		// Numeric data types:
 		'bit'                => 'INTEGER',
 		'bool'               => 'INTEGER',
@@ -193,7 +297,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *   https://www.sqlite.org/lang_datefunc.html
 	 *   https://strftime.org/
 	 */
-	const MYSQL_DATE_FORMAT_TO_SQLITE_STRFTIME_MAP = array(
+	private const MYSQL_DATE_FORMAT_TO_SQLITE_STRFTIME_MAP = array(
 		'%a' => '%D',
 		'%b' => '%M',
 		'%c' => '%n',
@@ -235,7 +339,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * See:
 	 *   https://dev.mysql.com/doc/refman/8.4/en/data-type-defaults.html#data-type-defaults-implicit
 	 */
-	const DATA_TYPE_IMPLICIT_DEFAULT_MAP = array(
+	private const DATA_TYPE_IMPLICIT_DEFAULT_MAP = array(
 		// Numeric data types:
 		'bit'                => '0',
 		'bool'               => '0',
@@ -305,7 +409,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * This is used to compute the column metadata from the information schema.
 	 */
-	const COLUMN_INFO_MYSQL_TO_NATIVE_TYPES_MAP = array(
+	private const COLUMN_INFO_MYSQL_TO_NATIVE_TYPES_MAP = array(
 		// Numeric data types:
 		'bit'             => array( 'BIT', 16, 1, 0 ),
 		'tinyint'         => array( 'TINY', 1, 4, 0 ),
@@ -369,7 +473,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * This is used to compute the MySQL column metadata for non-column fields
 	 * that have no records in the information schema (i.e., expressions).
 	 */
-	const COLUMN_INFO_SQLITE_TO_NATIVE_TYPES_MAP = array(
+	private const COLUMN_INFO_SQLITE_TO_NATIVE_TYPES_MAP = array(
 		'NULL'    => array( 'NULL', 6, 0, 0 ),
 		'INT'     => array( 'LONGLONG', 8, 21, 0 ),
 		'INTEGER' => array( 'LONGLONG', 8, 21, 0 ),
@@ -388,7 +492,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	private $mysql_version;
 
 	/**
-	 * The SQLite engine version.
+	 * The emulated MySQL client library version.
 	 *
 	 * This is a mysqli-like property that is needed to avoid a PHP warning in
 	 * the WordPress health info. The "WP_Debug_Data::get_wp_database()" method
@@ -442,6 +546,47 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @var WP_SQLite_Connection_Interface
 	 */
 	private $connection;
+
+	/**
+	 * Caller-visible PDO error mode.
+	 *
+	 * The underlying SQLite connection always uses exceptions so internal
+	 * operations can handle errors reliably.
+	 *
+	 * @var int
+	 */
+	private $error_mode = PDO::ERRMODE_EXCEPTION;
+
+	/**
+	 * Whether fetched scalar values should be converted to strings.
+	 *
+	 * PDO SQLite cannot report PDO::ATTR_STRINGIFY_FETCHES on PHP 7.2–8.1,
+	 * so the wrapper tracks its value on those versions.
+	 *
+	 * @var bool
+	 */
+	private $stringify_fetches = false;
+
+	/**
+	 * SQLSTATE associated with the last PDO operation.
+	 *
+	 * @var string|null
+	 */
+	private $error_code;
+
+	/**
+	 * Error information associated with the last PDO operation.
+	 *
+	 * @var array
+	 */
+	private $error_info = array( '', null, null );
+
+	/**
+	 * ID generated by the last user-issued INSERT or REPLACE statement.
+	 *
+	 * @var string
+	 */
+	private $last_insert_id = '0';
 
 	/**
 	 * User-defined functions registered on the SQLite connection.
@@ -596,16 +741,9 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * TODO: This may be represented using a temporary table in the future,
 	 *       together with GLOBAL SQL mode (a non-temporary table).
 	 *
-	 * @var string[]
+	 * @var int
 	 */
-	private $active_sql_modes = array(
-		'ERROR_FOR_DIVISION_BY_ZERO',
-		'NO_ENGINE_SUBSTITUTION',
-		'NO_ZERO_DATE',
-		'NO_ZERO_IN_DATE',
-		'ONLY_FULL_GROUP_BY',
-		'STRICT_TRANS_TABLES',
-	);
+	private $active_sql_modes;
 
 	/**
 	 * A name-to-value map of MySQL system variables for the current session.
@@ -637,29 +775,35 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * Set up an SQLite connection and the MySQL-on-SQLite driver.
 	 *
-	 * In addition to the standard PDO constructor arguments, the following
-	 * driver-specific values can be passed using the "$options" argument:
+	 * @param string      $dsn      MySQL-on-SQLite DSN containing the SQLite path and database name.
+	 * @param string|null $username Optional. Ignored by this driver.
+	 * @param string|null $password Optional. Ignored by this driver.
+	 * @param array|null  $options  {
+	 *     Optional PDO attributes and WP_MySQL_On_SQLite options.
 	 *
-	 *   - "connection"    A WP_SQLite_Connection_Interface instance to use.
-	 *                     When provided, the "pdo" option is ignored.
-	 *   - "pdo"           A PDO instance with an SQLite connection to use.
-	 *   - "mysql_version" The emulated MySQL version. Default: 80038.
-	 *   - "journal_mode"  The SQLite journal mode (for new connections).
-	 *   - "synchronous"   The SQLite synchronous setting (for new connections).
+	 *     Numeric keys are handled as standard PDO constructor options.
+	 *     Driver-specific PDO options are not supported.
 	 *
-	 * @param string      $dsn      The Data Source Name, e.g. "mysql-on-sqlite:dbname=wp;path=/path/to/db.sqlite".
-	 * @param string|null $username Unused. A PDO API compatibility argument.
-	 * @param string|null $password Unused. A PDO API compatibility argument.
-	 * @param array       $options  Driver options. See the description above.
+	 *     @type int             $mysql_version       Optional. MySQL version to emulate. Default 80038.
+	 *     @type object|null     $sqlite_connection   Optional. An existing WP_SQLite_Connection_Interface
+	 *                                                instance to run queries through. Takes precedence
+	 *                                                over "sqlite_pdo" and the DSN path.
+	 *     @type PDO|null        $sqlite_pdo          Optional. Existing PDO SQLite connection.
+	 *     @type string|null     $sqlite_journal_mode Optional. SQLite journal mode. Default 'WAL'.
+	 *     @type string|int|null $sqlite_synchronous  Optional. SQLite synchronous setting.
+	 * }
 	 *
-	 * @throws WP_SQLite_Driver_Exception When the driver initialization fails.
+	 * @throws InvalidArgumentException     When the MySQL version is invalid.
+	 * @throws WP_MySQL_On_SQLite_Exception When the driver initialization fails.
 	 */
 	public function __construct(
 		string $dsn,
 		?string $username = null,
 		?string $password = null,
-		array $options = array()
+		?array $options = null
 	) {
+		$options = $options ?? array();
+
 		// PDO DSN can't include "\0" bytes; parsing stops at the first one.
 		$first_null_byte_index = strpos( $dsn, "\0" );
 		if ( false !== $first_null_byte_index ) {
@@ -699,28 +843,55 @@ class WP_MySQL_On_SQLite extends PDO {
 		$path    = $args['path'] ?? ':memory:';
 		$db_name = $args['dbname'] ?? 'sqlite_database';
 
+		$mysql_version = $options['mysql_version'] ?? self::DEFAULT_MYSQL_VERSION;
+		if ( ! is_int( $mysql_version ) || $mysql_version < self::MINIMUM_MYSQL_VERSION ) {
+			throw new InvalidArgumentException(
+				sprintf(
+					'The "mysql_version" option must be an integer greater than or equal to %d.',
+					self::MINIMUM_MYSQL_VERSION
+				)
+			);
+		}
+
+		$pdo_options = array_filter(
+			$options,
+			function ( $key ) {
+				return is_int( $key );
+			},
+			ARRAY_FILTER_USE_KEY
+		);
+
+		$connection_pdo_options = array();
+		if ( array_key_exists( PDO::ATTR_PERSISTENT, $pdo_options ) ) {
+			// Persistence is connection-time-only. Do not apply it again after initialization.
+			$connection_pdo_options[ PDO::ATTR_PERSISTENT ] = $pdo_options[ PDO::ATTR_PERSISTENT ];
+			unset( $pdo_options[ PDO::ATTR_PERSISTENT ] );
+		}
+
 		// Use the provided SQLite connection, or create a new one.
 		if (
-			isset( $options['connection'] )
-			&& $options['connection'] instanceof WP_SQLite_Connection_Interface
+			isset( $options['sqlite_connection'] )
+			&& $options['sqlite_connection'] instanceof WP_SQLite_Connection_Interface
 		) {
-			$this->connection = $options['connection'];
+			$this->connection = $options['sqlite_connection'];
 		} else {
 			$connection_options = array(
-				'journal_mode' => $options['journal_mode'] ?? null,
-				'synchronous'  => $options['synchronous'] ?? null,
+				'journal_mode' => $options['sqlite_journal_mode'] ?? null,
+				'synchronous'  => $options['sqlite_synchronous'] ?? null,
+				'pdo_options'  => $connection_pdo_options,
 			);
-			if ( isset( $options['pdo'] ) ) {
-				$connection_options['pdo'] = $options['pdo'];
+			if ( isset( $options['sqlite_pdo'] ) ) {
+				$connection_options['pdo'] = $options['sqlite_pdo'];
 			} else {
 				$connection_options['path'] = $path;
 			}
 			$this->connection = new WP_SQLite_Connection( $connection_options );
 		}
 
-		$this->mysql_version = $options['mysql_version'] ?? 80038;
+		$this->mysql_version = $mysql_version;
 		$this->main_db_name  = $db_name;
 		$this->db_name       = $db_name;
+		$this->set_sql_modes( $this->get_default_sql_modes() );
 
 		// Check the database name.
 		if ( '' === $this->db_name ) {
@@ -751,7 +922,7 @@ class WP_MySQL_On_SQLite extends PDO {
 				 * with SQLite versions < 3.37.0 when "PRAGMA writable_schema" is
 				 * set to "ON", which also enables error-tolerant schema parsing.
 				 *
-				 * This is an unsafe opt-in feature for special back compatibility
+				 * This is an unsafe opt-in feature for special backward compatibility
 				 * use cases, as it can corrupt the database by allowing incorrect
 				 * types into STRICT tables. Additionally, depending on the legacy
 				 * SQLite version used, there is no guarantee that all features of
@@ -774,8 +945,8 @@ class WP_MySQL_On_SQLite extends PDO {
 			}
 		}
 
-		// Load SQLite version to a property used by WordPress health info.
-		$this->client_info = $sqlite_version;
+		// Load MySQL client information to a property used by WordPress health info.
+		$this->client_info = $this->getAttribute( PDO::ATTR_CLIENT_VERSION );
 
 		// Enable foreign keys. By default, they are off.
 		$this->connection->query( 'PRAGMA foreign_keys = ON' );
@@ -813,6 +984,35 @@ class WP_MySQL_On_SQLite extends PDO {
 				);
 			}
 		);
+
+		foreach ( $pdo_options as $attribute => $value ) {
+			$this->setAttribute( $attribute, $value );
+		}
+	}
+
+	/**
+	 * PDO API: Prepare a MySQL statement for execution.
+	 *
+	 * Prepared statements are not implemented yet. Report the standard PDO
+	 * unsupported-function diagnostic instead of using uninitialized parent
+	 * PDO state.
+	 *
+	 * @param  string     $query   The MySQL statement to prepare.
+	 * @param  array|null $options Optional statement options.
+	 * @return PDOStatement|false False when exceptions are disabled.
+	 *
+	 * @throws WP_MySQL_On_SQLite_Exception When exception mode is enabled.
+	 */
+	#[ReturnTypeWillChange]
+	public function prepare( $query, $options = null ) {
+		$driver_message = 'driver does not support prepared statements';
+		$exception      = $this->new_driver_exception(
+			'SQLSTATE[IM001]: Driver does not support this function: ' . $driver_message,
+			'IM001',
+			null,
+			array( 'IM001', 0, $driver_message )
+		);
+		return $this->handle_pdo_error( $exception );
 	}
 
 	/**
@@ -827,7 +1027,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @return PDOStatement|false PDO statement, or false when the fetch mode is invalid on PHP < 8.1.
 	 *
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	#[ReturnTypeWillChange]
 	public function query( string $query, ?int $fetch_mode = null, ...$fetch_mode_args ) {
@@ -858,11 +1058,6 @@ class WP_MySQL_On_SQLite extends PDO {
 				);
 				return false;
 			}
-
-			// When the default FETCH_BOTH is not set explicitly, additional
-			// arguments are ignored, and the argument count is not validated.
-			$fetch_mode      = $this->connection->get_attribute( PDO::ATTR_DEFAULT_FETCH_MODE );
-			$fetch_mode_args = array();
 		} elseif ( PDO::FETCH_COLUMN === $fetch_mode ) {
 			if ( 3 !== $arg_count ) {
 				throw new ArgumentCountError(
@@ -996,8 +1191,17 @@ class WP_MySQL_On_SQLite extends PDO {
 				$this->last_result_statement = $this->create_result_statement_from_data( array(), array() );
 			}
 
-			$stmt = new WP_PDO_Proxy_Statement( $this->last_result_statement, $this->last_affected_rows );
-			$stmt->setFetchMode( $fetch_mode, ...$fetch_mode_args );
+			$stmt = new WP_MySQL_On_SQLite_Statement(
+				$this->last_result_statement,
+				$query,
+				$this->create_column_meta_resolver( $this->last_column_meta ),
+				$this->last_affected_rows
+			);
+			if ( null !== $fetch_mode ) {
+				$stmt->setFetchMode( $fetch_mode, ...$fetch_mode_args );
+			}
+			$this->error_code = '00000';
+			$this->error_info = array( '00000', null, null );
 			return $stmt;
 		} catch ( Throwable $e ) {
 			try {
@@ -1006,12 +1210,18 @@ class WP_MySQL_On_SQLite extends PDO {
 			} catch ( Throwable $rollback_exception ) {
 				// Ignore rollback errors.
 			}
-			if ( $e instanceof WP_SQLite_Driver_Exception ) {
-				throw $e;
-			} elseif ( $e instanceof WP_SQLite_Information_Schema_Exception ) {
-				throw $this->convert_information_schema_exception( $e );
+			if ( $e instanceof WP_SQLite_Information_Schema_Exception ) {
+				$e = $this->convert_information_schema_exception( $e );
 			}
-			throw $this->new_driver_exception( $e->getMessage(), $e->getCode(), $e );
+			if ( $e instanceof WP_MySQL_On_SQLite_Exception ) {
+				$driver_exception = $e;
+			} elseif ( $e instanceof PDOException ) {
+				$driver_exception = $this->convert_sqlite_exception( $e );
+			} else {
+				$driver_exception = $this->new_driver_exception( $e->getMessage(), $e->getCode(), $e );
+			}
+
+			return $this->handle_pdo_error( $driver_exception );
 		} finally {
 			// A query that doesn't return any rows or fails sets found rows to 0.
 			if ( ! $this->is_readonly || isset( $e ) ) {
@@ -1028,7 +1238,59 @@ class WP_MySQL_On_SQLite extends PDO {
 	#[ReturnTypeWillChange]
 	public function exec( $query ) {
 		$stmt = $this->query( $query );
+		if ( false === $stmt ) {
+			return false;
+		}
 		return $stmt->rowCount();
+	}
+
+	/**
+	 * PDO API: Return the ID of the last inserted row.
+	 *
+	 * @param  string|null $name Optional sequence name. Ignored by SQLite.
+	 * @return string|false      The last insert ID, or false on failure.
+	 */
+	#[ReturnTypeWillChange]
+	public function lastInsertId( $name = null ) {
+		if (
+			is_array( $name )
+			|| is_resource( $name )
+			|| ( is_object( $name ) && ! method_exists( $name, '__toString' ) )
+		) {
+			if ( PHP_VERSION_ID >= 80000 ) {
+				throw new TypeError(
+					sprintf(
+						'PDO::lastInsertId(): Argument #1 ($name) must be of type ?string, %s given',
+						get_debug_type( $name )
+					)
+				);
+			}
+			trigger_error(
+				sprintf( 'PDO::lastInsertId() expects parameter 1 to be string, %s given', strtolower( gettype( $name ) ) ),
+				E_USER_WARNING
+			);
+			return false;
+		}
+
+		return $this->last_insert_id;
+	}
+
+	/**
+	 * PDO API: Fetch the SQLSTATE associated with the last operation.
+	 *
+	 * @return string|null The SQLSTATE error code, or null when unavailable.
+	 */
+	public function errorCode(): ?string {
+		return $this->error_code;
+	}
+
+	/**
+	 * PDO API: Fetch error information associated with the last operation.
+	 *
+	 * @return array Error information from the last PDO operation.
+	 */
+	public function errorInfo(): array {
+		return $this->error_info;
 	}
 
 	/**
@@ -1039,9 +1301,8 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return string         The quoted string.
 	 */
 	#[ReturnTypeWillChange]
-	// phpcs:ignore Universal.NamingConventions.NoReservedKeywordParameterNames.stringFound
 	public function quote( $string, $type = PDO::PARAM_STR ) {
-		// Mirror PDO\MySQL::quote() value validation.
+		// Mirror value validation from the PDO MySQL driver.
 		if (
 			is_array( $string )
 			|| is_resource( $string )
@@ -1105,11 +1366,11 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @return bool True on success, false on failure.
 	 */
-	// phpcs:ignore WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid
 	public function beginTransaction(): bool {
 		if ( $this->inTransaction() ) {
 			throw $this->new_driver_exception( 'There is already an active transaction' );
 		}
+		$this->flush();
 		$this->begin_user_transaction();
 		return true;
 	}
@@ -1123,6 +1384,7 @@ class WP_MySQL_On_SQLite extends PDO {
 		if ( ! $this->inTransaction() ) {
 			throw $this->new_driver_exception( 'There is no active transaction' );
 		}
+		$this->flush();
 		$this->commit_user_transaction();
 		return true;
 	}
@@ -1132,11 +1394,11 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @return bool True on success, false on failure.
 	 */
-	// phpcs:ignore WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid
 	public function rollBack(): bool {
 		if ( ! $this->inTransaction() ) {
 			throw $this->new_driver_exception( 'There is no active transaction' );
 		}
+		$this->flush();
 		$this->rollback_user_transaction();
 		return true;
 	}
@@ -1146,7 +1408,6 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @return bool True if a transaction is active, false otherwise.
 	 */
-	// phpcs:ignore WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid
 	public function inTransaction(): bool {
 		return $this->connection->in_transaction();
 	}
@@ -1154,8 +1415,8 @@ class WP_MySQL_On_SQLite extends PDO {
 	/**
 	 * PDO API: Set a PDO attribute.
 	 *
-	 * TODO: Evaluate whether we should pass all PDO attributes to the PDO SQLite
-	 *       instance, or whether some of them require special handling.
+	 * TODO: Evaluate whether we should pass all PDO attributes to the underlying
+	 *       PDO instance, or whether some of them require special handling.
 	 *       See: https://github.com/php/php-src/blob/b391c28f903536e3bc6a0021ae0976ddbc2745f8/ext/pdo/php_pdo_driver.h#L103
 	 *
 	 * @param int   $attribute The attribute to set.
@@ -1163,14 +1424,35 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return bool            True on success, false on failure.
 	 */
 	public function setAttribute( $attribute, $value ): bool {
-		return $this->connection->set_attribute( $attribute, $value );
+		// PDO reserves IDs starting at 1000 for driver-specific attributes.
+		// These differ for MySQL and SQLite and are currently not supported.
+		if ( is_int( $attribute ) && 1000 <= $attribute ) {
+			return false;
+		}
+
+		// Track the caller's error mode while keeping internal SQLite operations in exception mode.
+		if ( PDO::ATTR_ERRMODE === $attribute ) {
+			$result = $this->connection->set_attribute( $attribute, $value );
+			if ( ! $result ) {
+				return false;
+			}
+			$this->error_mode = $this->connection->get_attribute( PDO::ATTR_ERRMODE );
+			$this->connection->set_attribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
+			return true;
+		}
+
+		$result = $this->connection->set_attribute( $attribute, $value );
+		if ( $result && PDO::ATTR_STRINGIFY_FETCHES === $attribute ) {
+			$this->stringify_fetches = (bool) $value;
+		}
+		return $result;
 	}
 
 	/**
 	 * PDO API: Get a PDO attribute.
 	 *
-	 * TODO: Evaluate whether we should get all PDO attributes from the PDO SQLite
-	 *       instance, or whether some of them require special handling.
+	 * TODO: Evaluate whether we should get all PDO attributes from the underlying
+	 *       PDO instance, or whether some of them require special handling.
 	 *       See: https://github.com/php/php-src/blob/b391c28f903536e3bc6a0021ae0976ddbc2745f8/ext/pdo/php_pdo_driver.h#L103
 	 *
 	 * @param  int   $attribute The attribute to get.
@@ -1178,11 +1460,51 @@ class WP_MySQL_On_SQLite extends PDO {
 	 */
 	#[ReturnTypeWillChange]
 	public function getAttribute( $attribute ) {
+		if ( PDO::ATTR_DRIVER_NAME === $attribute ) {
+			return 'mysql';
+		} elseif ( PDO::ATTR_CLIENT_VERSION === $attribute ) {
+			return 'mysqlnd ' . $this->get_mysql_server_version_string();
+		} elseif ( PDO::ATTR_SERVER_VERSION === $attribute ) {
+			return $this->get_mysql_server_version_string();
+		} elseif ( PDO::ATTR_ERRMODE === $attribute ) {
+			// Return the caller's error mode instead of the exception mode used internally.
+			return $this->error_mode;
+		} elseif ( PDO::ATTR_STRINGIFY_FETCHES === $attribute && PHP_VERSION_ID < 80200 ) {
+			// PDO SQLite cannot report this attribute before PHP 8.2.
+			return $this->stringify_fetches;
+		}
 		return $this->connection->get_attribute( $attribute );
 	}
 
 	/**
+	 * Get the underlying PDO SQLite instance.
+	 *
+	 * Exposes the PDO SQLite connection for advanced use, bypassing MySQL emulation.
+	 * Do not retain it across reconnections or modify driver-owned state.
+	 *
+	 * Only connections backed by a local PDO SQLite handle can expose one. Remote
+	 * backends, such as the Cloudflare D1 connection, have no PDO instance to give.
+	 *
+	 * @return PDO The underlying PDO SQLite instance.
+	 *
+	 * @throws WP_MySQL_On_SQLite_Exception When the connection is not PDO-backed.
+	 */
+	public function get_sqlite_pdo(): PDO {
+		if ( ! $this->connection instanceof WP_SQLite_Connection ) {
+			throw $this->new_driver_exception(
+				sprintf(
+					'The "%s" connection is not backed by a PDO SQLite instance.',
+					get_class( $this->connection )
+				)
+			);
+		}
+		return $this->connection->get_pdo();
+	}
+
+	/**
 	 * Get the SQLite connection instance.
+	 *
+	 * @access private
 	 *
 	 * @return WP_SQLite_Connection_Interface
 	 */
@@ -1204,6 +1526,8 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * The saved driver version corresponds to the latest version of the SQLite
 	 * driver that was used to initialize and configure the SQLite database.
+	 *
+	 * @access private
 	 *
 	 * @return string       SQLite driver version as a string.
 	 * @throws PDOException When the query execution fails.
@@ -1230,15 +1554,24 @@ class WP_MySQL_On_SQLite extends PDO {
 	/**
 	 * Check if a specific SQL mode is active.
 	 *
+	 * @access private
+	 *
 	 * @param  string $mode The SQL mode to check.
 	 * @return bool         True if the SQL mode is active, false otherwise.
 	 */
 	public function is_sql_mode_active( string $mode ): bool {
-		return in_array( strtoupper( $mode ), $this->active_sql_modes, true );
+		$mode = strtoupper( $mode );
+		if ( 'NOT_USED' === $mode && $this->mysql_version < 80000 ) {
+			return false;
+		}
+		return isset( self::SQL_MODES[ $mode ] )
+			&& ( $this->active_sql_modes & self::SQL_MODES[ $mode ] ) !== 0;
 	}
 
 	/**
 	 * Get the last executed MySQL query.
+	 *
+	 * @access private
 	 *
 	 * @return string|null
 	 */
@@ -1249,6 +1582,8 @@ class WP_MySQL_On_SQLite extends PDO {
 	/**
 	 * Get SQLite queries executed for the last MySQL query.
 	 *
+	 * @access private
+	 *
 	 * @return array{ sql: string, params: array }[]
 	 */
 	public function get_last_sqlite_queries(): array {
@@ -1256,20 +1591,9 @@ class WP_MySQL_On_SQLite extends PDO {
 	}
 
 	/**
-	 * Get the auto-increment value generated for the last query.
-	 *
-	 * @return int|string
-	 */
-	public function get_insert_id() {
-		$last_insert_id = $this->connection->get_last_insert_id();
-		if ( is_numeric( $last_insert_id ) ) {
-			$last_insert_id = (int) $last_insert_id;
-		}
-		return $last_insert_id;
-	}
-
-	/**
 	 * Tokenize a MySQL query and initialize a parser.
+	 *
+	 * @access private
 	 *
 	 * @param  string          $query The MySQL query to parse.
 	 * @return WP_MySQL_Parser        A parser initialized for the MySQL query.
@@ -1277,8 +1601,8 @@ class WP_MySQL_On_SQLite extends PDO {
 	public function create_parser( string $query ): WP_MySQL_Parser {
 		$lexer  = new WP_MySQL_Lexer(
 			$query,
-			80038,
-			$this->active_sql_modes
+			$this->mysql_version,
+			$this->get_active_sql_mode_names()
 		);
 		$tokens = $lexer instanceof WP_MySQL_Native_Lexer
 			? $lexer->native_token_stream()
@@ -1303,177 +1627,9 @@ class WP_MySQL_On_SQLite extends PDO {
 	}
 
 	/**
-	 * Get the number of columns returned by the last emulated query.
-	 *
-	 * @return int
-	 */
-	public function get_last_column_count(): int {
-		return count( $this->last_column_meta );
-	}
-
-	/**
-	 * Get column metadata for results of the last emulated query.
-	 *
-	 * @return array
-	 */
-	public function get_last_column_meta(): array {
-		// Build the column metadata as per "PDOStatement::getColumnMeta()".
-		$column_meta = array();
-		foreach ( $this->last_column_meta as $meta ) {
-			$table = $meta['table'] ?? null;
-			$name  = $meta['name'];
-			$type  = strtoupper( $meta['sqlite:decl_type'] ?? $meta['native_type'] ?? '' );
-
-			// When table is known, we can get data from the information schema.
-			$column_info = null;
-			if ( null !== $table ) {
-				$table_is_temporary = $this->information_schema_builder->temporary_table_exists( $table );
-				$columns_table      = $this->information_schema_builder->get_table_name( $table_is_temporary, 'columns' );
-				$column_info        = $this->execute_sqlite_query(
-					sprintf(
-						'
-							SELECT
-								IS_NULLABLE,
-								DATA_TYPE,
-								COLUMN_TYPE,
-								COLUMN_KEY,
-								CHARACTER_MAXIMUM_LENGTH,
-								NUMERIC_PRECISION,
-								NUMERIC_SCALE
-							FROM %s
-							WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
-						',
-						$this->quote_sqlite_identifier( $columns_table )
-					),
-					array( $this->get_saved_db_name(), $table, $name )
-				)->fetch( PDO::FETCH_ASSOC );
-
-				if ( false === $column_info ) {
-					$column_info = null;
-				}
-			}
-
-			// If we have information schema data, we can use it.
-			if ( null !== $column_info ) {
-				$type_info = self::COLUMN_INFO_MYSQL_TO_NATIVE_TYPES_MAP[ $column_info['DATA_TYPE'] ] ?? null;
-				if ( null === $type_info ) {
-					$type_info = self::COLUMN_INFO_SQLITE_TO_NATIVE_TYPES_MAP[ $type ] ?? null;
-				}
-				$native_type = $type_info[0];
-				$mysqli_type = $type_info[1];
-				$len         = $type_info[2];
-				$precision   = $type_info[3];
-
-				if ( 'tinyint(1)' === $column_info['COLUMN_TYPE'] ) {
-					$len = 1;
-				}
-
-				if ( 'decimal' === $column_info['DATA_TYPE'] ) {
-					$len       = (int) $column_info['NUMERIC_PRECISION'] + (int) $column_info['NUMERIC_SCALE'];
-					$precision = (int) $column_info['NUMERIC_SCALE'];
-				}
-
-				if (
-					str_contains( $column_info['COLUMN_TYPE'], 'unsigned' )
-					&& ! str_contains( $column_info['COLUMN_TYPE'], 'bigint' )
-				) {
-					$len -= 1;
-				}
-
-				// If set, lenght can be taken from the information schema.
-				if ( isset( $column_info['CHARACTER_MAXIMUM_LENGTH'] ) ) {
-					$len = (int) $column_info['CHARACTER_MAXIMUM_LENGTH'];
-				}
-
-				// For string types, the length is multiplied by the maximum number
-				// of bytes per character for the used connection encoding. In our
-				// case, it's always "utf8mb4" and therefore 4 bytes per character.
-				if (
-					str_contains( $column_info['DATA_TYPE'], 'text' )
-					|| str_contains( $column_info['DATA_TYPE'], 'char' )
-					|| 'enum' === $column_info['DATA_TYPE']
-					|| 'set' === $column_info['DATA_TYPE']
-				) {
-					// Except for "longtext" - this might be a MySQL bug.
-					if ( 'longtext' !== $column_info['DATA_TYPE'] ) {
-						$len = 4 * $len;
-					}
-				}
-
-				// Flags.
-				$flags = array();
-				if ( 'NO' === $column_info['IS_NULLABLE'] ) {
-					$flags[] = 'not_null';
-				}
-				if ( 'PRI' === $column_info['COLUMN_KEY'] ) {
-					$flags[] = 'primary_key';
-				} elseif ( 'UNI' === $column_info['COLUMN_KEY'] ) {
-					$flags[] = 'unique_key';
-				} elseif ( 'MUL' === $column_info['COLUMN_KEY'] ) {
-					$flags[] = 'multiple_key';
-				}
-			} else {
-				$type_info   = self::COLUMN_INFO_SQLITE_TO_NATIVE_TYPES_MAP[ $type ];
-				$native_type = $type_info[0];
-				$mysqli_type = $type_info[1];
-				$len         = $type_info[2] ?? 0;
-				$precision   = $type_info[3];
-
-				// Flags.
-				$flags = array();
-				if ( 'NULL' !== $type ) {
-					$flags[] = 'not_null';
-				}
-			}
-
-			if ( 'BLOB' === $native_type || 'GEOMETRY' === $native_type ) {
-				$flags[] = 'blob';
-			}
-
-			// PDO type.
-			if ( 'INT' === $type || 'INTEGER' === $type ) {
-				$pdo_type = PDO::PARAM_INT;
-			} else {
-				$pdo_type = PDO::PARAM_STR;
-			}
-
-			// MySQLi charset number.
-			$is_string   = 'STRING' === $type || 'TEXT' === $type;
-			$is_binary   = 'BLOB' === $type || 'GEOMETRY' === $native_type;
-			$is_datetime = str_contains( $native_type, 'DATE' ) || str_contains( $native_type, 'TIME' ) || 'YEAR' === $native_type;
-			if ( $is_string && ! $is_binary && ! $is_datetime ) {
-				$mysqli_charsetnr = 255; // utf8mb4_0900_ai_ci
-			} else {
-				$mysqli_charsetnr = 63;  // binary
-			}
-
-			$column_meta[] = array(
-				'native_type'      => $native_type,
-				'pdo_type'         => $pdo_type,
-				'flags'            => $flags,
-				'table'            => $meta['table'] ?? '',
-				'name'             => $meta['name'],
-				'len'              => $len,
-				'precision'        => $precision,
-				'sqlite:decl_type' => $meta['sqlite:decl_type'] ?? '',
-
-				/*
-				 * The MySQLi PHP extension exposes more MySQL column metadata than PDO.
-				 * We'll add the data here for use cases such as "wpdb::get_col_info()".
-				 */
-				'mysqli:orgname'   => $meta['name'],        // TODO: Use correct original name when alias is used.
-				'mysqli:orgtable'  => $meta['table'] ?? '', // TODO: Use correct original name when table alias is used.
-				'mysqli:db'        => $this->db_name,       // TODO: Use correct DB for queries to information schema.
-				'mysqli:charsetnr' => $mysqli_charsetnr,
-				'mysqli:flags'     => 0,                    // TODO: We can compute correct MySQL flags.
-				'mysqli:type'      => $mysqli_type,
-			);
-		}
-		return $column_meta;
-	}
-
-	/**
 	 * Execute a query in SQLite.
+	 *
+	 * @access private
 	 *
 	 * @param string $sql   The query to execute.
 	 * @param array $params The query parameters.
@@ -1485,10 +1641,215 @@ class WP_MySQL_On_SQLite extends PDO {
 	}
 
 	/**
+	 * Create a lazy MySQL-compatible column metadata resolver.
+	 *
+	 * Only raw SQLite metadata and database context are snapshotted here.
+	 * The INFORMATION_SCHEMA metadata is resolved lazily and may reflect
+	 * schema changes made after statement execution. This is a trade-off
+	 * that avoids schema queries when column metadata is not requested.
+	 *
+	 * @param  array $raw_column_meta Raw SQLite result column metadata.
+	 * @return callable               The column metadata resolver.
+	 */
+	private function create_column_meta_resolver( array $raw_column_meta ): callable {
+		$db_name = $this->db_name;
+		return function ( $column ) use ( $raw_column_meta, $db_name ) {
+			if ( ! array_key_exists( $column, $raw_column_meta ) ) {
+				return false;
+			}
+
+			$last_sqlite_queries = $this->last_sqlite_queries;
+			try {
+				return $this->resolve_column_meta( $raw_column_meta[ $column ], $db_name );
+			} finally {
+				$this->last_sqlite_queries = $last_sqlite_queries;
+			}
+		};
+	}
+
+	/**
+	 * Resolve raw SQLite column metadata into MySQL-compatible metadata.
+	 *
+	 * @param  array  $meta    Raw SQLite column metadata.
+	 * @param  string $db_name Database selected when the query was executed.
+	 * @return array            MySQL-compatible column metadata.
+	 */
+	private function resolve_column_meta( array $meta, string $db_name ): array {
+		$table = $meta['table'] ?? null;
+		$name  = $meta['name'];
+		$type  = strtoupper( $meta['sqlite:decl_type'] ?? $meta['native_type'] ?? '' );
+
+		// When table is known, we can get data from the information schema.
+		$column_info = null;
+		if ( null !== $table ) {
+			$table_is_temporary = $this->information_schema_builder->temporary_table_exists( $table );
+			$columns_table      = $this->information_schema_builder->get_table_name( $table_is_temporary, 'columns' );
+			$column_info        = $this->execute_sqlite_query(
+				sprintf(
+					'
+						SELECT
+							IS_NULLABLE,
+							DATA_TYPE,
+							COLUMN_TYPE,
+							COLUMN_KEY,
+							CHARACTER_MAXIMUM_LENGTH,
+							NUMERIC_PRECISION,
+							NUMERIC_SCALE
+						FROM %s
+						WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
+					',
+					$this->quote_sqlite_identifier( $columns_table )
+				),
+				array( $this->get_saved_db_name( $db_name ), $table, $name )
+			)->fetch( PDO::FETCH_ASSOC );
+
+			if ( false === $column_info ) {
+				$column_info = null;
+			}
+		}
+
+		// If we have information schema data, we can use it.
+		if ( null !== $column_info ) {
+			$type_info = self::COLUMN_INFO_MYSQL_TO_NATIVE_TYPES_MAP[ $column_info['DATA_TYPE'] ] ?? null;
+			if ( null === $type_info ) {
+				$type_info = self::COLUMN_INFO_SQLITE_TO_NATIVE_TYPES_MAP[ $type ] ?? null;
+			}
+			$native_type = $type_info[0];
+			$mysqli_type = $type_info[1];
+			$len         = $type_info[2];
+			$precision   = $type_info[3];
+
+			if ( 'tinyint(1)' === $column_info['COLUMN_TYPE'] ) {
+				$len = 1;
+			}
+
+			if ( 'decimal' === $column_info['DATA_TYPE'] ) {
+				$len       = (int) $column_info['NUMERIC_PRECISION'] + (int) $column_info['NUMERIC_SCALE'];
+				$precision = (int) $column_info['NUMERIC_SCALE'];
+			}
+
+			if (
+				str_contains( $column_info['COLUMN_TYPE'], 'unsigned' )
+				&& ! str_contains( $column_info['COLUMN_TYPE'], 'bigint' )
+			) {
+				$len -= 1;
+			}
+
+			// If set, length can be taken from the information schema.
+			if ( isset( $column_info['CHARACTER_MAXIMUM_LENGTH'] ) ) {
+				$len = (int) $column_info['CHARACTER_MAXIMUM_LENGTH'];
+			}
+
+			// For string types, the length is multiplied by the maximum number
+			// of bytes per character for the used connection encoding. In our
+			// case, it's always "utf8mb4" and therefore 4 bytes per character.
+			if (
+				str_contains( $column_info['DATA_TYPE'], 'text' )
+				|| str_contains( $column_info['DATA_TYPE'], 'char' )
+				|| 'enum' === $column_info['DATA_TYPE']
+				|| 'set' === $column_info['DATA_TYPE']
+			) {
+				// Except for "longtext" - this might be a MySQL bug.
+				if ( 'longtext' !== $column_info['DATA_TYPE'] ) {
+					$len = 4 * $len;
+				}
+			}
+
+			// Flags.
+			$flags = array();
+			if ( 'NO' === $column_info['IS_NULLABLE'] ) {
+				$flags[] = 'not_null';
+			}
+			if ( 'PRI' === $column_info['COLUMN_KEY'] ) {
+				$flags[] = 'primary_key';
+			} elseif ( 'UNI' === $column_info['COLUMN_KEY'] ) {
+				$flags[] = 'unique_key';
+			} elseif ( 'MUL' === $column_info['COLUMN_KEY'] ) {
+				$flags[] = 'multiple_key';
+			}
+		} else {
+			$type_info   = self::COLUMN_INFO_SQLITE_TO_NATIVE_TYPES_MAP[ $type ];
+			$native_type = $type_info[0];
+			$mysqli_type = $type_info[1];
+			$len         = $type_info[2] ?? 0;
+			$precision   = $type_info[3];
+
+			// Flags.
+			$flags = array();
+			if ( 'NULL' !== $type ) {
+				$flags[] = 'not_null';
+			}
+		}
+
+		if ( 'BLOB' === $native_type || 'GEOMETRY' === $native_type ) {
+			$flags[] = 'blob';
+		}
+
+		// PDO type.
+		if ( 'INT' === $type || 'INTEGER' === $type ) {
+			$pdo_type = PDO::PARAM_INT;
+		} else {
+			$pdo_type = PDO::PARAM_STR;
+		}
+
+		// MySQLi charset number.
+		$is_string   = 'STRING' === $type || 'TEXT' === $type;
+		$is_binary   = 'BLOB' === $type || 'GEOMETRY' === $native_type;
+		$is_datetime = str_contains( $native_type, 'DATE' ) || str_contains( $native_type, 'TIME' ) || 'YEAR' === $native_type;
+		if ( $is_string && ! $is_binary && ! $is_datetime ) {
+			$mysqli_charsetnr = 255; // utf8mb4_0900_ai_ci
+		} else {
+			$mysqli_charsetnr = 63;  // binary
+		}
+
+		return array(
+			'native_type'      => $native_type,
+			'pdo_type'         => $pdo_type,
+			'flags'            => $flags,
+			'table'            => $meta['table'] ?? '',
+			'name'             => $meta['name'],
+			'len'              => $len,
+			'precision'        => $precision,
+			'sqlite:decl_type' => $meta['sqlite:decl_type'] ?? '',
+
+			/*
+			 * The MySQLi PHP extension exposes more MySQL column metadata than PDO.
+			 * We'll add the data here for use cases such as "wpdb::get_col_info()".
+			 */
+			'mysqli:orgname'   => $meta['name'],        // TODO: Use correct original name when alias is used.
+			'mysqli:orgtable'  => $meta['table'] ?? '', // TODO: Use correct original name when table alias is used.
+			'mysqli:db'        => $db_name,             // TODO: Use correct DB for queries to information schema.
+			'mysqli:charsetnr' => $mysqli_charsetnr,
+			'mysqli:flags'     => 0,                    // TODO: We can compute correct MySQL flags.
+			'mysqli:type'      => $mysqli_type,
+		);
+	}
+
+	/**
+	 * Record and report a PDO operation error according to the configured mode.
+	 *
+	 * @param  WP_MySQL_On_SQLite_Exception $exception The operation error.
+	 * @return false                                    Always false when the error is not thrown.
+	 * @throws WP_MySQL_On_SQLite_Exception When exception mode is enabled.
+	 */
+	private function handle_pdo_error( WP_MySQL_On_SQLite_Exception $exception ): bool {
+		$this->error_info = $exception->errorInfo;
+		$this->error_code = $this->error_info[0];
+
+		if ( PDO::ERRMODE_EXCEPTION === $this->error_mode ) {
+			throw $exception;
+		}
+		if ( PDO::ERRMODE_WARNING === $this->error_mode ) {
+			trigger_error( $exception->getMessage(), E_USER_WARNING );
+		}
+		return false;
+	}
+
+	/**
 	 * Translate and execute a MySQL query in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "query" AST node with "simpleStatement" child.
-	 * @throws WP_SQLite_Driver_Exception When the query is not supported.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query is not supported.
 	 */
 	private function execute_mysql_query( WP_Parser_Node $node ): void {
 		if ( 'query' !== $node->rule_name ) {
@@ -1794,7 +2155,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * effect immediately and a ROLLBACK cannot undo them.
 	 *
 	 * @param  string $statement          The MySQL statement type being handled.
-	 * @throws WP_SQLite_Driver_Exception When the fallback behavior is "error".
+	 * @throws WP_MySQL_On_SQLite_Exception When the fallback behavior is "error".
 	 */
 	private function handle_unsupported_transaction_statement( string $statement ): void {
 		if ( 'error' === $this->transaction_fallback ) {
@@ -1820,7 +2181,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Execute a MySQL transaction or locking statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "transactionOrLockingStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_transaction_or_locking_statement( WP_Parser_Node $node ): void {
 		$subnode = $node->get_first_child_node();
@@ -1902,9 +2263,9 @@ class WP_MySQL_On_SQLite extends PDO {
 								sprintf( 'SELECT 1 FROM %s LIMIT 0', $table_name )
 							);
 						} catch ( PDOException $e ) {
-							throw $this->new_driver_exception(
-								sprintf( "Table '%s.%s' doesn't exist", $this->db_name, $table_name ),
-								'42S02'
+							throw $this->new_table_not_found_exception(
+								sprintf( '%s.%s', $this->db_name, $table_name ),
+								$e
 							);
 						}
 					}
@@ -1946,7 +2307,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL SELECT statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "selectStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_select_statement( WP_Parser_Node $node ): void {
 		/*
@@ -2026,7 +2387,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL INSERT or REPLACE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "insertStatement" or "replaceStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_insert_or_replace_statement( WP_Parser_Node $node ): void {
 		$parts                   = array();
@@ -2074,7 +2435,7 @@ class WP_MySQL_On_SQLite extends PDO {
 				 * ON CONFLICT clause differently, and at this stage, we only
 				 * save the translated update list to a variable.
 				 *
-				 * See bellow at "Handle ON CONFLICT clause for SQLite < 3.35.0".
+				 * See below at "Handle ON CONFLICT clause for SQLite < 3.35.0".
 				 */
 				$sqlite_version = $this->get_sqlite_version();
 				if ( version_compare( $sqlite_version, '3.35.0', '<' ) ) {
@@ -2143,17 +2504,19 @@ class WP_MySQL_On_SQLite extends PDO {
 					throw $e;
 				}
 			}
+			$this->last_insert_id = $this->connection->get_last_insert_id();
 			return;
 		}
 
 		$this->last_result_statement = $this->execute_sqlite_query( $query );
+		$this->last_insert_id        = $this->connection->get_last_insert_id();
 	}
 
 	/**
 	 * Translate and execute a MySQL UPDATE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "updateStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_update_statement( WP_Parser_Node $node ): void {
 		// @TODO: Add support for UPDATE with multiple tables and JOINs.
@@ -2403,7 +2766,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL DELETE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "deleteStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_delete_statement( WP_Parser_Node $node ): void {
 		/*
@@ -2544,7 +2907,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL CREATE TABLE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "createStatement" AST node with "createTable" child.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_create_table_statement( WP_Parser_Node $node ): void {
 		$subnode = $node->get_first_child_node();
@@ -2625,7 +2988,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL ALTER TABLE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "alterStatement" AST node with "alterTable" child.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_alter_table_statement( WP_Parser_Node $node ): void {
 		$table_ref  = $node->get_first_descendant_node( 'tableRef' );
@@ -2713,7 +3076,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL DROP TABLE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "dropStatement" AST node with "dropTable" child.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_drop_table_statement( WP_Parser_Node $node ): void {
 		// Record the changes in the information schema.
@@ -2765,7 +3128,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL TRUNCATE TABLE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "truncateTableStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_truncate_table_statement( WP_Parser_Node $node ): void {
 		$table_ref  = $node->get_first_child_node( 'tableRef' );
@@ -2796,7 +3159,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL CREATE INDEX statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "createStatement" AST node with "createIndex" child.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_create_index_statement( WP_Parser_Node $node ): void {
 		$create_index = $node->get_first_child_node( 'createIndex' );
@@ -2854,7 +3217,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL DROP INDEX statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "dropStatement" AST node with "dropIndex" child.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_drop_index_statement( WP_Parser_Node $node ): void {
 		$drop_index = $node->get_first_child_node( 'dropIndex' );
@@ -2895,7 +3258,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL SHOW statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "showStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_show_statement( WP_Parser_Node $node ): void {
 		$tokens   = $node->get_child_tokens();
@@ -2991,31 +3354,7 @@ class WP_MySQL_On_SQLite extends PDO {
 				$this->execute_show_tables_statement( $node );
 				return;
 			case WP_MySQL_Lexer::VARIABLES_SYMBOL:
-				$this->last_column_meta      = array(
-					array(
-						'native_type' => 'STRING',
-						'pdo_type'    => PDO::PARAM_STR,
-						'flags'       => array( 'not_null' ),
-						'table'       => 'session_variables',
-						'name'        => 'Variable_name',
-						'len'         => 256,
-						'precision'   => 0,
-					),
-					array(
-						'native_type' => 'STRING',
-						'pdo_type'    => PDO::PARAM_STR,
-						'flags'       => array(),
-						'table'       => 'session_variables',
-						'name'        => 'Value',
-						'len'         => 4096,
-						'precision'   => 0,
-					),
-				);
-				$this->last_result_statement = $this->create_result_statement_from_data(
-					array_column( $this->last_column_meta, 'name' ),
-					array()
-				);
-				$this->found_rows            = 0;
+				$this->execute_show_variables_statement( $node );
 				return;
 		}
 
@@ -3026,6 +3365,39 @@ class WP_MySQL_On_SQLite extends PDO {
 				$keyword1->get_value()
 			)
 		);
+	}
+
+	/**
+	 * Translate and execute a MySQL SHOW VARIABLES statement in SQLite.
+	 *
+	 * @param WP_Parser_Node $node The "showStatement" AST node.
+	 */
+	private function execute_show_variables_statement( WP_Parser_Node $node ): void {
+		$like_or_where = $node->get_first_child_node( 'likeOrWhere' );
+		if ( null !== $like_or_where ) {
+			$condition = $this->translate_show_like_or_where_condition( $like_or_where, 'Variable_name' );
+		}
+
+		$query  = sprintf(
+			"SELECT column1 AS `Variable_name`, column2 AS `Value`
+			FROM (
+				VALUES
+					('version', ?),
+					('version_comment', ?)
+			)
+			WHERE TRUE %s
+			ORDER BY column1",
+			$condition ?? ''
+		);
+		$params = array(
+			$this->get_mysql_server_version_string(),
+			$this->get_mysql_server_version_comment(),
+		);
+
+		$stmt = $this->execute_sqlite_query( $query, $params );
+		$this->store_last_column_meta_from_statement( $stmt );
+		$this->last_result_statement = $stmt;
+		$this->found_rows            = array( $query, $params );
 	}
 
 	/**
@@ -3193,7 +3565,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL SHOW TABLE STATUS statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "showStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_show_table_status_statement( WP_Parser_Node $node ): void {
 		// FROM/IN database.
@@ -3280,7 +3652,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL SHOW TABLES statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "showStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_show_tables_statement( WP_Parser_Node $node ): void {
 		// FROM/IN database.
@@ -3330,7 +3702,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL SHOW COLUMNS statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "showStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 * @throws PDOException               When given table doesn't exist.
 	 */
 	private function execute_show_columns_statement( WP_Parser_Node $node ): void {
@@ -3359,10 +3731,7 @@ class WP_MySQL_On_SQLite extends PDO {
 		)->fetchColumn();
 
 		if ( ! $table_exists ) {
-			throw $this->new_driver_exception(
-				sprintf( "Table '%s.%s' doesn't exist", $database, $table_name ),
-				'42S02'
-			);
+			throw $this->new_table_not_found_exception( sprintf( '%s.%s', $database, $table_name ) );
 		}
 
 		// LIKE and WHERE clauses.
@@ -3425,7 +3794,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL DESCRIBE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "describeStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_describe_statement( WP_Parser_Node $node ): void {
 		$table_ref  = $node->get_first_child_node( 'tableRef' );
@@ -3464,7 +3833,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL USE statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "useStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_use_statement( WP_Parser_Node $node ): void {
 		$database_name = $this->unquote_sqlite_identifier(
@@ -3489,7 +3858,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Translate and execute a MySQL SET statement in SQLite.
 	 *
 	 * @param  WP_Parser_Node $node       The "setStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_set_statement( WP_Parser_Node $node ): void {
 		/*
@@ -3602,7 +3971,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @param  WP_Parser_Node $value_node    The "setExprOrDefault" AST node.
 	 * @param  int            $default_type  The currently active default variable type.
 	 *                                       One of the SESSION, GLOBAL, PERSIST, PERSIST_ONLY tokens.
-	 * @throws WP_SQLite_Driver_Exception    When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception  When the query execution fails.
 	 */
 	private function execute_set_system_variable_statement(
 		WP_Parser_Node $set_var_node,
@@ -3656,7 +4025,7 @@ class WP_MySQL_On_SQLite extends PDO {
 		/*
 		 * Handle ON/OFF values. They are accepted as both strings and keywords.
 		 *
-		 * @TODO: This is actually variable-specific and depends on the its type.
+		 * @TODO: This is actually variable-specific and depends on its type.
 		 *        For example:
 		 *          SET autocommit = OFF;                   SELECT @@autocommit;                 -> 0
 		 *          SET autocommit = false;                 SELECT @@autocommit;                 -> 0
@@ -3666,21 +4035,26 @@ class WP_MySQL_On_SQLite extends PDO {
 		 *          SET updatable_views_with_limit = false; SELECT @@updatable_views_with_limit; -> NO
 		 */
 		$lowercase_value = null === $value ? null : strtolower( $value );
-		if ( 'on' === $lowercase_value || 'off' === $lowercase_value ) {
+		if ( 'sql_mode' !== $name && ( 'on' === $lowercase_value || 'off' === $lowercase_value ) ) {
 			$value = 'on' === $lowercase_value ? 1 : 0;
 		}
 
 		if ( WP_MySQL_Lexer::SESSION_SYMBOL === $type ) {
 			if ( 'sql_mode' === $name ) {
-				// MySQL ignores trailing ASCII spaces in SQL mode names.
-				$modes = explode( ',', strtoupper( $value ) );
-				foreach ( $modes as $i => $mode ) {
-					$modes[ $i ] = rtrim( $mode, ' ' );
+				if ( null !== $value_node->get_first_child_token( WP_MySQL_Lexer::DEFAULT_SYMBOL ) ) {
+					$sql_modes = $this->get_default_sql_modes();
+				} elseif ( is_string( $value ) ) {
+					/*
+					 * MySQL removes spaces only from the end of the complete value.
+					 * Spaces within individual mode names remain invalid.
+					 *
+					 * See: https://github.com/mysql/mysql-server/blob/8.4/sql/strfunc.cc#L39-L64
+					 */
+					$sql_modes = explode( ',', rtrim( $value, ' ' ) );
+				} else {
+					$sql_modes = $value;
 				}
-				if ( in_array( 'NO_BACKSLASH_ESCAPES', $modes, true ) ) {
-					throw $this->new_not_supported_exception( "SQL mode 'NO_BACKSLASH_ESCAPES'" );
-				}
-				$this->active_sql_modes = $modes;
+				$this->set_sql_modes( $sql_modes );
 			} else {
 				$this->session_system_variables[ $name ] = $value;
 			}
@@ -3700,7 +4074,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node $user_variable The "userVariable" AST node.
 	 * @param  WP_Parser_Node $expr          The "expr" AST node.
-	 * @throws WP_SQLite_Driver_Exception    When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception  When the query execution fails.
 	 */
 	private function execute_set_user_variable_statement(
 		WP_Parser_Node $user_variable,
@@ -3725,7 +4099,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *  - REPAIR TABLE
 	 *
 	 * @param  WP_Parser_Node $node       A "tableAdministrationStatement" AST node.
-	 * @throws WP_SQLite_Driver_Exception When the query execution fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the query execution fails.
 	 */
 	private function execute_administration_statement( WP_Parser_Node $node ): void {
 		$first_token    = $node->get_first_child_token();
@@ -3776,7 +4150,9 @@ class WP_MySQL_On_SQLite extends PDO {
 						);
 				}
 			} catch ( PDOException $e ) {
-				if ( 'HY000' === $e->getCode() ) {
+				if ( '42S02' === $e->getCode() && isset( $e->errorInfo[2] ) ) {
+					$errors = array( $e->errorInfo[2] );
+				} elseif ( 'HY000' === $e->getCode() ) {
 					$errors = array( "Table '$table_name' doesn't exist" );
 				} else {
 					$errors = array( $e->getMessage() );
@@ -3852,7 +4228,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @param  WP_Parser_Node $node The "expr" AST node.
 	 * @return mixed                The value of the expression.
 	 */
-	public function evaluate_expression( WP_Parser_Node $node ) {
+	private function evaluate_expression( WP_Parser_Node $node ) {
 		// To support expressions, we'll use a SQLite query.
 		$stmt = $this->execute_sqlite_query(
 			sprintf( 'SELECT %s', $this->translate( $node ) )
@@ -3876,7 +4252,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node|WP_MySQL_Token $node The AST node to translate.
 	 * @return string|null                         The translated query fragment.
-	 * @throws WP_SQLite_Driver_Exception          When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception        When the translation fails.
 	 */
 	private function translate( $node ): ?string {
 		if ( null === $node ) {
@@ -4031,17 +4407,11 @@ class WP_MySQL_On_SQLite extends PDO {
 				$name = strtolower( $original_name );
 				$type = $type_token ? $type_token->id : WP_MySQL_Lexer::SESSION_SYMBOL;
 				if ( 'sql_mode' === $name ) {
-					$value = implode( ',', $this->active_sql_modes );
+					$value = implode( ',', $this->get_active_sql_mode_names() );
 				} elseif ( 'version' === $name ) {
-					$version = (string) $this->mysql_version;
-					$value   = sprintf(
-						'%d.%d.%d',
-						$version[0],
-						substr( $version, 1, 2 ),
-						substr( $version, 3, 2 )
-					);
+					$value = $this->get_mysql_server_version_string();
 				} elseif ( 'version_comment' === $name ) {
-					$value = 'MySQL Community Server - GPL';
+					$value = $this->get_mysql_server_version_comment();
 				} elseif ( WP_MySQL_Lexer::SESSION_SYMBOL === $type ) {
 					$value = $this->session_system_variables[ $name ] ?? null;
 				} else {
@@ -4195,7 +4565,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @param  array<WP_Parser_Node|WP_MySQL_Token> $nodes     The MySQL token to translate.
 	 * @param  string                               $separator The separator to use between fragments.
 	 * @return string|null                                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception                      When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception                    When the translation fails.
 	 */
 	private function translate_sequence( array $nodes, string $separator = ' ' ): ?string {
 		$parts = array();
@@ -4301,7 +4671,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *                                          (table, view, procedure, trigger, etc.).
 	 * @param  WP_Parser_Node|null $child_node  An identifier node representing an object child name (column, index, etc.).
 	 * @return string                           The translated value.
-	 * @throws WP_SQLite_Driver_Exception       When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception     When the translation fails.
 	 */
 	private function translate_qualified_identifier(
 		?WP_Parser_Node $schema_node,
@@ -4349,7 +4719,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node $node       The "queryExpression" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
 	private function translate_query_expression( WP_Parser_Node $node ): string {
 		// Get the query expression subnode under which we need to look for the
@@ -4424,7 +4794,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node $node       The "querySpecification" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 * @return string|null
 	 */
 	private function translate_query_specification( WP_Parser_Node $node ): string {
@@ -4510,7 +4880,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param WP_Parser_Node $node        The "simpleExprBody" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
 	private function translate_simple_expr_body( WP_Parser_Node $node ): string {
 		$token = $node->get_first_child_token();
@@ -4558,7 +4928,7 @@ class WP_MySQL_On_SQLite extends PDO {
 				return $this->translate_cast_expr( $expr, $cast_type );
 			} else {
 				// CONVERT(expr USING charset): Keep "expr" as is (no SQLite support).
-				// TODO: Consider rejecting UTF-8-incompatible charasets.
+				// TODO: Consider rejecting UTF-8-incompatible charsets.
 				return $this->translate( $expr );
 			}
 		}
@@ -4592,7 +4962,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param WP_Parser_Node $node        The "predicateOperations" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
 	private function translate_like( WP_Parser_Node $node ): string {
 		$tokens    = $node->get_descendant_tokens();
@@ -4652,7 +5022,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node $node       The "predicateOperations" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
 	private function translate_regexp_functions( WP_Parser_Node $node ): string {
 		if ( ! $this->supports_udfs ) {
@@ -4689,7 +5059,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node $node       The "runtimeFunctionCall" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
 	private function translate_runtime_function_call( WP_Parser_Node $node ): string {
 		$child = $node->get_first_child();
@@ -4731,6 +5101,27 @@ class WP_MySQL_On_SQLite extends PDO {
 					$this->translate( $nodes[0] ),
 					$this->translate( $nodes[1] )
 				);
+			case WP_MySQL_Lexer::IF_SYMBOL:
+				/*
+				 * IF() is a reserved word, so it is parsed as a runtime function
+				 * call rather than a plain function call, and never reaches
+				 * "translate_function_call_without_udfs()". With user-defined
+				 * function support it resolves to the "if" UDF. Without it, a
+				 * CASE expression is the portable equivalent: SQLite only gained
+				 * IIF() in 3.32.0, and an "if" alias for it in 3.48.0.
+				 *
+				 * As in MySQL, a NULL condition selects the "else" branch.
+				 */
+				if ( $this->supports_udfs ) {
+					return $this->translate_sequence( $node->get_children() );
+				}
+				$nodes = $node->get_child_nodes();
+				return sprintf(
+					'CASE WHEN %s THEN %s ELSE %s END',
+					$this->translate( $nodes[0] ),
+					$this->translate( $nodes[1] ),
+					$this->translate( $nodes[2] )
+				);
 			default:
 				return $this->translate_sequence( $node->get_children() );
 		}
@@ -4741,7 +5132,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node $node       The "functionCall" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
 	private function translate_function_call( WP_Parser_Node $node ): string {
 		$nodes = $node->get_child_nodes();
@@ -4844,14 +5235,7 @@ class WP_MySQL_On_SQLite extends PDO {
 					return 0;
 				}
 			case 'VERSION':
-				$version = (string) $this->mysql_version;
-				$value   = sprintf(
-					'%d.%d.%d',
-					$version[0],
-					substr( $version, 1, 2 ),
-					substr( $version, 3, 2 )
-				);
-				return $this->quote_sqlite_value( $value );
+				return $this->quote_sqlite_value( $this->get_mysql_server_version_string() );
 			default:
 				if ( ! $this->supports_udfs ) {
 					$rewritten = $this->translate_function_call_without_udfs( $name, $args );
@@ -4861,6 +5245,42 @@ class WP_MySQL_On_SQLite extends PDO {
 				}
 				return $this->translate_sequence( $node->get_children() );
 		}
+	}
+
+	/**
+	 * Get the configured MySQL version in dotted notation.
+	 *
+	 * @return string The MySQL version.
+	 */
+	private function get_mysql_version_string(): string {
+		return sprintf(
+			'%d.%d.%d',
+			intdiv( $this->mysql_version, 10000 ),
+			intdiv( $this->mysql_version % 10000, 100 ),
+			$this->mysql_version % 100
+		);
+	}
+
+	/**
+	 * Get the raw version string of the emulated MySQL server.
+	 *
+	 * @return string The MySQL server version.
+	 */
+	private function get_mysql_server_version_string(): string {
+		return sprintf(
+			'%s-mysql-on-sqlite-%s',
+			$this->get_mysql_version_string(),
+			SQLITE_DRIVER_VERSION
+		);
+	}
+
+	/**
+	 * Get the comment identifying the emulated MySQL server implementation.
+	 *
+	 * @return string The MySQL server version comment.
+	 */
+	private function get_mysql_server_version_comment(): string {
+		return 'MySQL on SQLite';
 	}
 
 	/**
@@ -4878,7 +5298,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return string|null    The rewritten SQLite expression, or null when
 	 *                        the function is not emulated with a UDF and
 	 *                        should be passed through unchanged.
-	 * @throws WP_SQLite_Driver_Exception When the function cannot be used
+	 * @throws WP_MySQL_On_SQLite_Exception When the function cannot be used
 	 *                                    without user-defined functions.
 	 */
 	private function translate_function_call_without_udfs( string $name, array $args ): ?string {
@@ -4916,10 +5336,19 @@ class WP_MySQL_On_SQLite extends PDO {
 				 * The ISO week is computed from the day-of-year of the
 				 * Thursday in the date's week ("STRFTIME('%V')" would need
 				 * SQLite 3.46+).
+				 *
+				 * Mode 0 is computed the same way "%U" is defined, for the
+				 * same reason: that specifier also needs SQLite 3.46+.
+				 * With a 0-based day of the year and a 0-based weekday
+				 * starting on Sunday, the week number is
+				 * "(day_of_year + 7 - weekday) / 7", truncated.
 				 */
 				$mode = $args[1] ?? '0';
 				if ( '0' === $mode ) {
-					return sprintf( "CAST(STRFTIME('%%U', %s) AS INTEGER)", $args[0] );
+					return sprintf(
+						"((CAST(STRFTIME('%%j', %1\$s) AS INTEGER) + 6 - CAST(STRFTIME('%%w', %1\$s) AS INTEGER)) / 7)",
+						$args[0]
+					);
 				}
 				if ( '1' === $mode ) {
 					return sprintf(
@@ -4931,10 +5360,11 @@ class WP_MySQL_On_SQLite extends PDO {
 					'WEEK() with a mode other than 0 or 1 (the connection does not support user-defined functions)'
 				);
 			case 'UNIX_TIMESTAMP':
+				// STRFTIME('%s') rather than UNIXEPOCH(), which needs SQLite 3.38+.
 				if ( 0 === count( $args ) ) {
-					return "UNIXEPOCH('now')";
+					return "CAST(STRFTIME('%s', 'now') AS INTEGER)";
 				}
-				return sprintf( 'UNIXEPOCH(%s)', $args[0] );
+				return sprintf( "CAST(STRFTIME('%%s', %s) AS INTEGER)", $args[0] );
 			case 'FROM_UNIXTIME':
 				if ( 1 === count( $args ) ) {
 					return sprintf( "DATETIME(%s, 'unixepoch')", $args[0] );
@@ -4965,8 +5395,6 @@ class WP_MySQL_On_SQLite extends PDO {
 				return "TIME('now')";
 			case 'ISNULL':
 				return sprintf( '(%s IS NULL)', $args[0] );
-			case 'IF':
-				return sprintf( 'IIF(%s, %s, %s)', $args[0], $args[1], $args[2] );
 			case 'FIELD':
 				$fragment = sprintf( 'CASE %s', $args[0] );
 				for ( $i = 1; $i < count( $args ); $i++ ) {
@@ -4981,13 +5409,29 @@ class WP_MySQL_On_SQLite extends PDO {
 				if ( 2 === count( $args ) ) {
 					return sprintf( 'INSTR(%s, %s)', $args[1], $args[0] );
 				}
+				// A CASE expression rather than IIF(), which needs SQLite 3.32+.
 				return sprintf(
-					'IIF(INSTR(SUBSTR(%2$s, %3$s), %1$s) = 0, 0, INSTR(SUBSTR(%2$s, %3$s), %1$s) + %3$s - 1)',
+					'CASE WHEN INSTR(SUBSTR(%2$s, %3$s), %1$s) = 0 THEN 0 ELSE INSTR(SUBSTR(%2$s, %3$s), %1$s) + %3$s - 1 END',
 					$args[0],
 					$args[1],
 					$args[2]
 				);
 			case 'LOG':
+				/*
+				 * SQLite's LN() is one of the math functions, available only
+				 * from SQLite 3.35.0 and only when the library was compiled
+				 * with SQLITE_ENABLE_MATH_FUNCTIONS, which is not guaranteed.
+				 * Constant arguments are evaluated in PHP so that the common
+				 * cases work on every supported SQLite build; other arguments
+				 * still compile to LN() and need a math-enabled library.
+				 */
+				$constants = array();
+				foreach ( $args as $arg ) {
+					$constants[] = $this->get_numeric_literal_value( $arg );
+				}
+				if ( ! in_array( null, $constants, true ) ) {
+					return $this->evaluate_logarithm( $constants );
+				}
 				if ( 1 === count( $args ) ) {
 					return sprintf( 'LN(%s)', $args[0] );
 				}
@@ -5114,6 +5558,52 @@ class WP_MySQL_On_SQLite extends PDO {
 			return str_replace( "''", "'", $matches[1] );
 		}
 		return null;
+	}
+
+	/**
+	 * Extract the value of a translated SQLite numeric literal expression.
+	 *
+	 * @param  string $expression The translated SQLite expression.
+	 * @return float|null         The numeric value, or null when the
+	 *                            expression is not a plain numeric literal.
+	 */
+	private function get_numeric_literal_value( string $expression ): ?float {
+		if ( 1 === preg_match( '/^-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$/', $expression ) ) {
+			return (float) $expression;
+		}
+		return null;
+	}
+
+	/**
+	 * Evaluate a MySQL LOG() call over constant arguments.
+	 *
+	 * As in MySQL, out-of-domain arguments produce NULL rather than an error:
+	 * a non-positive value, and for the two-argument form, a base that is not
+	 * positive or that equals 1.
+	 *
+	 * @param  float[] $args The constant argument values, as per MySQL LOG().
+	 * @return string        The SQLite literal for the result.
+	 */
+	private function evaluate_logarithm( array $args ): string {
+		if ( 1 === count( $args ) ) {
+			$base  = M_E;
+			$value = $args[0];
+		} else {
+			$base  = $args[0];
+			$value = $args[1];
+		}
+
+		if ( $value <= 0 || $base <= 0 || 1.0 === $base ) {
+			return 'NULL';
+		}
+
+		$result = M_E === $base ? log( $value ) : log( $value ) / log( $base );
+
+		/*
+		 * A locale-independent representation with enough precision to
+		 * round-trip a double, matching how SQLite renders REAL values.
+		 */
+		return rtrim( rtrim( sprintf( '%.17G', $result ), '0' ), '.' );
 	}
 
 	/**
@@ -5251,7 +5741,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @param  WP_Parser_Node $node       The "selectItem" AST node.
 	 * @return string                     The translated expression.
 	 */
-	public function translate_select_item( WP_Parser_Node $node ): string {
+	private function translate_select_item( WP_Parser_Node $node ): string {
 		/*
 		 * First, let's translate the select item subtree.
 		 *
@@ -5365,9 +5855,9 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @param  WP_Parser_Node $node       The "tableRef" AST node.
 	 * @return string                     The translated value.
-	 * @throws WP_SQLite_Driver_Exception When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
-	public function translate_table_ref( WP_Parser_Node $node ): string {
+	private function translate_table_ref( WP_Parser_Node $node ): string {
 		// The table reference is in "<schema>.<table>" or "<table>" format.
 		$parts  = $node->get_descendant_nodes( 'identifier' );
 		$table  = array_pop( $parts );
@@ -5488,7 +5978,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @param  array  $column_map         Optional. A map of column names (old name -> new name)
 	 *                                    to use when copying data from the original table.
 	 *                                    When not provided, all columns are copied without renaming.
-	 * @throws WP_SQLite_Driver_Exception
+	 * @throws WP_MySQL_On_SQLite_Exception
 	 */
 	private function recreate_table_from_information_schema(
 		bool $table_is_temporary,
@@ -5666,7 +6156,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @param  WP_Parser_Node $like_or_where The "likeOrWhere" AST node.
 	 * @param  string         $like_column   The column name to use in the LIKE clause ("table_name", "column_name", etc.).
 	 * @return string                        The translated value.
-	 * @throws WP_SQLite_Driver_Exception    When the translation fails.
+	 * @throws WP_MySQL_On_SQLite_Exception  When the translation fails.
 	 */
 	private function translate_show_like_or_where_condition( WP_Parser_Node $like_or_where, string $like_column ): string {
 		$like_clause = $like_or_where->get_first_child_node( 'likeClause' );
@@ -5776,13 +6266,7 @@ class WP_MySQL_On_SQLite extends PDO {
 
 		// Check if the table exists.
 		if ( 0 === count( $columns ) ) {
-			throw $this->new_driver_exception(
-				sprintf(
-					"SQLSTATE[42S02]: Base table or view not found: 1146 Table '%s' doesn't exist",
-					$table_name
-				),
-				'42S02'
-			);
+			throw $this->new_table_not_found_exception( $table_name );
 		}
 
 		// Get a list of columns that are targeted by the INSERT or REPLACE query.
@@ -6090,13 +6574,7 @@ class WP_MySQL_On_SQLite extends PDO {
 
 		// Check if the table exists.
 		if ( 0 === count( $columns ) ) {
-			throw $this->new_driver_exception(
-				sprintf(
-					"SQLSTATE[42S02]: Base table or view not found: 1146 Table '%s' doesn't exist",
-					$table_name
-				),
-				'42S02'
-			);
+			throw $this->new_table_not_found_exception( $table_name );
 		}
 
 		$column_map = array_combine( array_column( $columns, 'COLUMN_NAME' ), $columns );
@@ -6156,6 +6634,171 @@ class WP_MySQL_On_SQLite extends PDO {
 			$fragment .= $value;
 		}
 		return $fragment;
+	}
+
+	/**
+	 * Get the default SQL modes for the emulated MySQL version.
+	 *
+	 * @return string[] Default SQL mode names.
+	 */
+	private function get_default_sql_modes(): array {
+		$sql_modes = self::DEFAULT_SQL_MODES;
+		if ( $this->mysql_version < 80000 ) {
+			$sql_modes[] = 'NO_AUTO_CREATE_USER';
+		}
+
+		return $sql_modes;
+	}
+
+	/**
+	 * Set the active SQL modes from a name list or numeric bitmask.
+	 *
+	 * @param string[]|int $modes SQL mode names or a numeric bitmask.
+	 */
+	private function set_sql_modes( $modes ): void {
+		if ( null === $modes ) {
+			throw $this->new_invalid_sql_mode_exception( $modes );
+		}
+
+		$known_sql_modes_mask = array_sum( self::SQL_MODES );
+
+		// TIME_TRUNCATE_FRACTIONAL was introduced in MySQL 8.0.1.
+		if ( $this->mysql_version < 80001 ) {
+			$known_sql_modes_mask &= ~self::SQL_MODES['TIME_TRUNCATE_FRACTIONAL'];
+		}
+
+		// Numeric SQL mode bitmap assignment (e.g., "SET sql_mode = 4" for ANSI_QUOTES).
+		if ( is_int( $modes ) ) {
+			// Ensure the bitmap contains only SQL mode bits known to the emulated MySQL version.
+			if ( $modes < 0 || ( $modes & ~$known_sql_modes_mask ) !== 0 ) {
+				throw $this->new_invalid_sql_mode_exception( $modes );
+			}
+
+			// Reject recognized but no longer supported SQL modes.
+			$unsupported_sql_modes = 0;
+			foreach ( self::SQL_MODES as $mode => $value ) {
+				if ( ( $modes & $value ) !== 0 && $this->is_sql_mode_removed( $mode ) ) {
+					$unsupported_sql_modes |= $value;
+				}
+			}
+
+			if ( 0 !== $unsupported_sql_modes ) {
+				throw $this->new_driver_exception(
+					sprintf(
+						'SQLSTATE[HY000]: General error: 3899 sql_mode=0x%08x is not supported.',
+						$unsupported_sql_modes
+					),
+					'HY000'
+				);
+			}
+
+			$sql_modes = $modes;
+		} elseif ( is_array( $modes ) ) {
+			// String SQL mode assignment (e.g., "SET sql_mode = 'ANSI_QUOTES,STRICT_TRANS_TABLES'").
+			$sql_modes = 0;
+			foreach ( $modes as $mode ) {
+				if ( '' === $mode ) {
+					continue;
+				}
+
+				$normalized_mode = strtoupper( $mode );
+				$mode_value      = self::SQL_MODES[ $normalized_mode ] ?? 0;
+				if (
+					0 === ( $mode_value & $known_sql_modes_mask )
+					|| ( 'NOT_USED' === $normalized_mode && $this->mysql_version < 80000 )
+					|| $this->is_sql_mode_removed( $normalized_mode )
+				) {
+					throw $this->new_invalid_sql_mode_exception( $mode );
+				}
+
+				$sql_modes |= $mode_value;
+			}
+		} else {
+			throw $this->new_driver_exception(
+				"SQLSTATE[42000]: Syntax error or access violation: 1232 Incorrect argument type to variable 'sql_mode'",
+				'42000'
+			);
+		}
+
+		if ( ( $sql_modes & self::SQL_MODES['NO_BACKSLASH_ESCAPES'] ) !== 0 ) {
+			throw $this->new_not_supported_exception( "SQL mode 'NO_BACKSLASH_ESCAPES'" );
+		}
+
+		/*
+		 * MySQL retains composite SQL modes while enabling their component modes.
+		 * Store both so "@@sql_mode" and individual mode checks match MySQL, even
+		 * though not all resulting modes are respected by the emulation yet.
+		 *
+		 * See:
+		 *   https://dev.mysql.com/doc/refman/8.4/en/sql-mode.html#sql-mode-combo
+		 *   https://github.com/mysql/mysql-server/blob/8.4/sql/sys_vars.cc
+		 */
+		if ( ( $sql_modes & self::SQL_MODES['ANSI'] ) !== 0 ) {
+			$sql_modes |= self::SQL_MODES['REAL_AS_FLOAT']
+				| self::SQL_MODES['PIPES_AS_CONCAT']
+				| self::SQL_MODES['ANSI_QUOTES']
+				| self::SQL_MODES['IGNORE_SPACE']
+				| self::SQL_MODES['ONLY_FULL_GROUP_BY'];
+		}
+
+		$this->active_sql_modes = $sql_modes;
+	}
+
+	/**
+	 * Check whether an SQL mode was removed from the emulated MySQL version.
+	 *
+	 * @param  string $mode Normalized SQL mode name.
+	 * @return bool         Whether the SQL mode was removed.
+	 */
+	private function is_sql_mode_removed( string $mode ): bool {
+		/*
+		 * MySQL still recognizes the legacy bits for modes removed in 8.0.11
+		 * so it can report them as unsupported, rather than unknown.
+		 */
+		return $this->mysql_version >= 80011
+			&& in_array(
+				$mode,
+				array(
+					'POSTGRESQL',
+					'ORACLE',
+					'MSSQL',
+					'DB2',
+					'MAXDB',
+					'NO_KEY_OPTIONS',
+					'NO_TABLE_OPTIONS',
+					'NO_FIELD_OPTIONS',
+					'MYSQL323',
+					'MYSQL40',
+					'NO_AUTO_CREATE_USER',
+				),
+				true
+			);
+	}
+
+	/**
+	 * Get the active SQL mode names in canonical bitmask order.
+	 *
+	 * @return string[] Active SQL mode names.
+	 */
+	private function get_active_sql_mode_names(): array {
+		$active_modes = array();
+		foreach ( self::SQL_MODES as $mode => $value ) {
+			if ( ( $this->active_sql_modes & $value ) !== 0 ) {
+				if ( 'NOT_USED' === $mode && $this->mysql_version < 80000 ) {
+					/*
+					 * MySQL 5.7 represents reserved bit 4 with a comma in its mode
+					 * name table. Two empty components preserve that serialization
+					 * when the final list is joined with commas.
+					 */
+					$active_modes[] = '';
+					$active_modes[] = '';
+				} else {
+					$active_modes[] = $mode;
+				}
+			}
+		}
+
+		return $active_modes;
 	}
 
 	/**
@@ -6648,7 +7291,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @param  string      $table_name         The name of the table to create.
 	 * @param  string|null $new_table_name     Override the original table name for ALTER TABLE emulation.
 	 * @return string[]                        Queries to create the table, indexes, and constraints.
-	 * @throws WP_SQLite_Driver_Exception      When the table information is missing.
+	 * @throws WP_MySQL_On_SQLite_Exception    When the table information is missing.
 	 */
 	private function get_sqlite_create_table_statement(
 		bool $table_is_temporary,
@@ -6672,10 +7315,7 @@ class WP_MySQL_On_SQLite extends PDO {
 		)->fetch( PDO::FETCH_ASSOC );
 
 		if ( false === $table_info ) {
-			throw $this->new_driver_exception(
-				sprintf( "Table '%s' doesn't exist", $table_name ),
-				'42S02'
-			);
+			throw $this->new_table_not_found_exception( $table_name );
 		}
 
 		// 2. Get column info.
@@ -7497,6 +8137,7 @@ class WP_MySQL_On_SQLite extends PDO {
 		$this->last_sqlite_queries      = array();
 		$this->last_result_statement    = null;
 		$this->last_affected_rows       = null;
+		$this->last_insert_id           = '0';
 		$this->last_column_meta         = array();
 		$this->is_readonly              = false;
 		$this->wrapper_transaction_type = null;
@@ -7530,19 +8171,21 @@ class WP_MySQL_On_SQLite extends PDO {
 	}
 
 	/**
-	 * Create a new SQLite driver exception.
+	 * Create a new MySQL-on-SQLite driver exception.
 	 *
-	 * @param string         $message  The exception message.
-	 * @param int|string     $code     The exception code. For PDO errors, a string representing SQLSTATE.
-	 * @param Throwable|null $previous The previous exception.
-	 * @return WP_SQLite_Driver_Exception
+	 * @param string         $message    The exception message.
+	 * @param int|string     $code       The exception code. For PDO errors, a string representing SQLSTATE.
+	 * @param Throwable|null $previous   The previous exception.
+	 * @param array|null     $error_info PDO-style error information.
+	 * @return WP_MySQL_On_SQLite_Exception
 	 */
 	private function new_driver_exception(
 		string $message,
 		$code = 0,
-		?Throwable $previous = null
-	): WP_SQLite_Driver_Exception {
-		return new WP_SQLite_Driver_Exception( $this, $message, $code, $previous );
+		?Throwable $previous = null,
+		?array $error_info = null
+	): WP_MySQL_On_SQLite_Exception {
+		return new WP_MySQL_On_SQLite_Exception( $this, $message, $code, $previous, $error_info );
 	}
 
 	/**
@@ -7551,10 +8194,10 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * This exception can be used to mark cases that should never occur according
 	 * to the MySQL grammar. It may serve as an assertion that should never fail.
 	 *
-	 * @return WP_SQLite_Driver_Exception
+	 * @return WP_MySQL_On_SQLite_Exception
 	 */
-	private function new_invalid_input_exception(): WP_SQLite_Driver_Exception {
-		return new WP_SQLite_Driver_Exception( $this, 'MySQL query syntax error.' );
+	private function new_invalid_input_exception(): WP_MySQL_On_SQLite_Exception {
+		return new WP_MySQL_On_SQLite_Exception( $this, 'MySQL query syntax error.' );
 	}
 
 	/**
@@ -7563,25 +8206,80 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * This exception can be used to mark MySQL constructs that are not supported.
 	 *
 	 * @param string $cause The cause, indicating which construct is not supported.
-	 * @return WP_SQLite_Driver_Exception
+	 * @return WP_MySQL_On_SQLite_Exception
 	 */
-	private function new_not_supported_exception( string $cause ): WP_SQLite_Driver_Exception {
-		return new WP_SQLite_Driver_Exception(
+	private function new_not_supported_exception( string $cause ): WP_MySQL_On_SQLite_Exception {
+		return new WP_MySQL_On_SQLite_Exception(
 			$this,
 			sprintf( 'MySQL query not supported. Cause: %s', $cause )
 		);
 	}
 
 	/**
+	 * Create a MySQL-compatible table-not-found exception.
+	 *
+	 * @param  string         $table_name The missing table name.
+	 * @param  Throwable|null $previous   The previous exception.
+	 * @return WP_MySQL_On_SQLite_Exception
+	 */
+	private function new_table_not_found_exception(
+		string $table_name,
+		?Throwable $previous = null
+	): WP_MySQL_On_SQLite_Exception {
+		$driver_message = sprintf( "Table '%s' doesn't exist", $table_name );
+		return $this->new_driver_exception(
+			'SQLSTATE[42S02]: Base table or view not found: 1146 ' . $driver_message,
+			'42S02',
+			$previous,
+			array( '42S02', 1146, $driver_message )
+		);
+	}
+
+	/**
+	 * Create a MySQL-compatible exception for an invalid SQL mode value.
+	 *
+	 * @param  mixed $value The invalid SQL mode value.
+	 * @return WP_MySQL_On_SQLite_Exception
+	 */
+	private function new_invalid_sql_mode_exception( $value ): WP_MySQL_On_SQLite_Exception {
+		return $this->new_driver_exception(
+			sprintf(
+				"SQLSTATE[42000]: Syntax error or access violation: 1231 Variable 'sql_mode' can't be set to the value of '%s'",
+				null === $value ? 'NULL' : (string) $value
+			),
+			'42000'
+		);
+	}
+
+	/**
 	 * Create a new access denied exception for the information schema database.
 	 *
-	 * @return WP_SQLite_Driver_Exception
+	 * @return WP_MySQL_On_SQLite_Exception
 	 */
-	private function new_access_denied_to_information_schema_exception(): WP_SQLite_Driver_Exception {
+	private function new_access_denied_to_information_schema_exception(): WP_MySQL_On_SQLite_Exception {
 		return $this->new_driver_exception(
 			"Access denied for user 'root'@'%' to database 'information_schema'",
 			'42000'
 		);
+	}
+
+	/**
+	 * Convert a SQLite PDO exception to a MySQL-on-SQLite driver exception.
+	 *
+	 * @param  PDOException $e The SQLite PDO exception.
+	 * @return WP_MySQL_On_SQLite_Exception
+	 */
+	private function convert_sqlite_exception( PDOException $e ): WP_MySQL_On_SQLite_Exception {
+		$error_info    = is_array( $e->errorInfo ) ? $e->errorInfo : array();
+		$sqlstate      = $error_info[0] ?? null;
+		$error_message = $error_info[2] ?? null;
+
+		if ( 'HY000' === $sqlstate && 0 === strpos( $error_message, 'no such table: ' ) ) {
+			$table_name = substr( $error_message, strlen( 'no such table: ' ) );
+			return $this->new_table_not_found_exception( $table_name, $e );
+		}
+
+		return $this->new_driver_exception( $e->getMessage(), $e->getCode(), $e );
 	}
 
 	/**
@@ -7598,52 +8296,55 @@ class WP_MySQL_On_SQLite extends PDO {
 	private function convert_information_schema_exception( WP_SQLite_Information_Schema_Exception $e ): Throwable {
 		switch ( $e->get_type() ) {
 			case WP_SQLite_Information_Schema_Exception::TYPE_DUPLICATE_TABLE_NAME:
+				$driver_message = sprintf( "Table '%s' already exists", $e->get_data()['table_name'] );
 				return $this->new_driver_exception(
-					sprintf(
-						"SQLSTATE[42S01]: Base table or view already exists: 1050 Table '%s' already exists",
-						$e->get_data()['table_name']
-					),
-					'42S01'
+					'SQLSTATE[42S01]: Base table or view already exists: 1050 ' . $driver_message,
+					'42S01',
+					null,
+					array( '42S01', 1050, $driver_message )
 				);
 			case WP_SQLite_Information_Schema_Exception::TYPE_DUPLICATE_COLUMN_NAME:
+				$driver_message = sprintf( "Duplicate column name '%s'", $e->get_data()['column_name'] );
 				return $this->new_driver_exception(
-					sprintf(
-						"SQLSTATE[42S21]: Column already exists: 1060 Duplicate column name '%s'",
-						$e->get_data()['column_name']
-					),
-					'42S21'
+					'SQLSTATE[42S21]: Column already exists: 1060 ' . $driver_message,
+					'42S21',
+					null,
+					array( '42S21', 1060, $driver_message )
 				);
 			case WP_SQLite_Information_Schema_Exception::TYPE_DUPLICATE_KEY_NAME:
+				$driver_message = sprintf( "Duplicate key name '%s'", $e->get_data()['key_name'] );
 				return $this->new_driver_exception(
-					sprintf(
-						"SQLSTATE[42000]: Syntax error or access violation: 1061 Duplicate key name '%s'",
-						$e->get_data()['key_name']
-					),
-					'42S21'
+					'SQLSTATE[42000]: Syntax error or access violation: 1061 ' . $driver_message,
+					'42000',
+					null,
+					array( '42000', 1061, $driver_message )
 				);
 			case WP_SQLite_Information_Schema_Exception::TYPE_KEY_COLUMN_NOT_FOUND:
+				$driver_message = sprintf( "Key column '%s' doesn't exist in table", $e->get_data()['column_name'] );
 				return $this->new_driver_exception(
-					sprintf(
-						"SQLSTATE[42000]: Syntax error or access violation: 1072 Key column '%s' doesn't exist in table",
-						$e->get_data()['column_name']
-					),
-					'42000'
+					'SQLSTATE[42000]: Syntax error or access violation: 1072 ' . $driver_message,
+					'42000',
+					null,
+					array( '42000', 1072, $driver_message )
 				);
 			case WP_SQLite_Information_Schema_Exception::TYPE_CONSTRAINT_DOES_NOT_EXIST:
+				$driver_message = sprintf( "Constraint '%s' does not exist.", $e->get_data()['name'] );
 				return $this->new_driver_exception(
-					sprintf(
-						"SQLSTATE[HY000]: General error: 3940 Constraint '%s' does not exist.",
-						$e->get_data()['name']
-					),
-					'HY000'
+					'SQLSTATE[HY000]: General error: 3940 ' . $driver_message,
+					'HY000',
+					null,
+					array( 'HY000', 3940, $driver_message )
 				);
 			case WP_SQLite_Information_Schema_Exception::TYPE_MULTIPLE_CONSTRAINTS_WITH_NAME:
+				$driver_message = sprintf(
+					"Table has multiple constraints with the name '%s'. Please use constraint specific 'DROP' clause.",
+					$e->get_data()['name']
+				);
 				return $this->new_driver_exception(
-					sprintf(
-						"SQLSTATE[HY000]: General error: 3939 Table has multiple constraints with the name '%s'. Please use constraint specific 'DROP' clause.",
-						$e->get_data()['name']
-					),
-					'HY000'
+					'SQLSTATE[HY000]: General error: 3939 ' . $driver_message,
+					'HY000',
+					null,
+					array( 'HY000', 3939, $driver_message )
 				);
 			default:
 				return $e;

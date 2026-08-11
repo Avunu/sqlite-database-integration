@@ -138,7 +138,7 @@ class WP_D1_DB extends WP_SQLite_DB {
 				null,
 				null,
 				array(
-					'connection'           => $connection,
+					'sqlite_connection'    => $connection,
 					'transaction_fallback' => (string) wp_sqlite_d1_config( 'WP_D1_TRANSACTION_FALLBACK', 'warn' ),
 				)
 			);

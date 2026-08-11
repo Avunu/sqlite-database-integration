@@ -1,9 +1,6 @@
 <?php
 /**
  * Functions to add admin notices if necessary.
- *
- * @since 1.0.0
- * @package wp-sqlite-integration
  */
 
 /**
@@ -22,11 +19,11 @@ function sqlite_plugin_admin_notice() {
 		return;
 	}
 
-	// If PDO SQLite is not loaded, bail early.
+	// Bail early if the pdo_sqlite extension is not loaded.
 	if ( ! extension_loaded( 'pdo_sqlite' ) ) {
 		printf(
 			'<div class="notice notice-error"><p>%s</p></div>',
-			esc_html__( 'The SQLite Integration plugin is active, but the PDO SQLite extension is missing from your server. Please make sure that PDO SQLite is enabled in your PHP installation.', 'sqlite-database-integration' )
+			esc_html__( 'The SQLite Integration plugin is active, but the pdo_sqlite extension is missing from your server. Please make sure that pdo_sqlite is enabled in your PHP installation.', 'sqlite-database-integration' )
 		);
 		return;
 	}
@@ -74,6 +71,3 @@ function sqlite_plugin_admin_notice() {
 	);
 }
 add_action( is_multisite() ? 'network_admin_notices' : 'admin_notices', 'sqlite_plugin_admin_notice' ); // Add the admin notices.
-
-// Remove the PL-plugin admin notices for SQLite.
-remove_action( 'admin_notices', 'perflab_sqlite_plugin_admin_notice' );

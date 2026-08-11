@@ -1,15 +1,10 @@
 <?php
 /**
  * Handle the SQLite activation.
- *
- * @since 1.0.0
- * @package wp-sqlite-integration
  */
 
 /**
  * Redirect to the plugin's admin screen on activation.
- *
- * @since 1.0.0
  *
  * @param string $plugin The plugin basename.
  */
@@ -33,8 +28,6 @@ add_action( 'activated_plugin', 'sqlite_plugin_activation_redirect' );
  * the user has permission to manage the database drop-in, and the nonce is valid.
  * If the above conditions are met, run the sqlite_plugin_copy_db_file() function,
  * and redirect to the install screen.
- *
- * @since 1.0.0
  */
 function sqlite_activation() {
 	if (
@@ -52,19 +45,6 @@ function sqlite_activation() {
 	}
 
 	check_admin_referer( 'sqlite-install' );
-
-	// Handle upgrading from the performance-lab plugin.
-	if ( isset( $_GET['upgrade-from-pl'] ) ) {
-		global $wp_filesystem;
-		require_once ABSPATH . '/wp-admin/includes/file.php';
-		// Delete the previous db.php file.
-		$wp_filesystem->delete( WP_CONTENT_DIR . '/db.php' );
-		// Deactivate the performance-lab SQLite module.
-		$pl_option_name = defined( 'PERFLAB_MODULES_SETTING' ) ? PERFLAB_MODULES_SETTING : 'perflab_modules_settings';
-		$pl_option      = get_option( $pl_option_name, array() );
-		unset( $pl_option['database/sqlite'] );
-		update_option( $pl_option_name, $pl_option );
-	}
 
 	sqlite_plugin_copy_db_file();
 
@@ -91,7 +71,7 @@ add_filter(
  * When the plugin gets merged in wp-core, this is not to be ported.
  */
 function sqlite_plugin_copy_db_file() {
-	// Bail early if the PDO SQLite extension is not loaded.
+	// Bail early if the pdo_sqlite extension is not loaded.
 	if ( ! extension_loaded( 'pdo_sqlite' ) ) {
 		return;
 	}

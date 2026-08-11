@@ -553,6 +553,85 @@ class WP_MySQL_Lexer_Tests extends TestCase {
 		$this->assertNull( $lexer->get_token() );
 	}
 
+	/**
+	 * @dataProvider data_ansi_quotes_tokenization
+	 */
+	public function test_ansi_quotes_changes_double_quote_tokenization(
+		string $sql,
+		array $sql_modes,
+		string $expected_token_name
+	): void {
+		$tokens = ( new WP_MySQL_Lexer( $sql, 80400, $sql_modes ) )->remaining_tokens();
+		$this->assertSame( $expected_token_name, $tokens[0]->get_name(), $sql );
+	}
+
+	public function data_ansi_quotes_tokenization(): array {
+		return array(
+			'double quote is a string by default'          => array( '"foo"', array(), 'SINGLE_QUOTED_TEXT' ),
+			'double quote is an identifier in ANSI_QUOTES' => array( '"foo"', array( 'ANSI_QUOTES' ), 'BACK_TICK_QUOTED_ID' ),
+			'ANSI_QUOTES is case-insensitive'              => array( '"foo"', array( 'ansi_quotes' ), 'BACK_TICK_QUOTED_ID' ),
+			'ANSI_QUOTES with other modes'                 => array( '"foo"', array( 'STRICT_ALL_TABLES', 'ANSI_QUOTES' ), 'BACK_TICK_QUOTED_ID' ),
+			'single quote stays a string in ANSI_QUOTES'   => array( "'foo'", array( 'ANSI_QUOTES' ), 'SINGLE_QUOTED_TEXT' ),
+			'backtick stays an identifier in ANSI_QUOTES'  => array( '`foo`', array( 'ANSI_QUOTES' ), 'BACK_TICK_QUOTED_ID' ),
+		);
+	}
+
+	public function test_composite_ansi_mode_expands_to_lexer_component_modes(): void {
+		// ANSI_QUOTES: a double-quoted sequence is a quoted identifier.
+		$lexer = new WP_MySQL_Lexer( '"foo"', 80400, array( 'ANSI' ) );
+		$this->assertTrue( $lexer->next_token() );
+		$this->assertSame( WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, $lexer->get_token()->id );
+
+		// PIPES_AS_CONCAT: "||" is the string concatenation operator.
+		$lexer = new WP_MySQL_Lexer( '||', 80400, array( 'ANSI' ) );
+		$this->assertTrue( $lexer->next_token() );
+		$this->assertSame( WP_MySQL_Lexer::CONCAT_PIPES_SYMBOL, $lexer->get_token()->id );
+
+		// IGNORE_SPACE: whitespace is permitted between a function name and "(".
+		$lexer = new WP_MySQL_Lexer( 'COUNT (1)', 80400, array( 'ANSI' ) );
+		$this->assertTrue( $lexer->next_token() );
+		$this->assertSame( WP_MySQL_Lexer::KEYWORDS['COUNT'], $lexer->get_token()->id );
+	}
+
+	/**
+	 * Quoted identifiers escape delimiters by doubling, not with backslashes.
+	 *
+	 * @dataProvider data_quoted_identifier_backslash
+	 */
+	public function test_quoted_identifiers_treat_backslash_literally(
+		string $sql,
+		array $sql_modes,
+		int $expected_token_id,
+		string $expected_value
+	): void {
+		$lexer = new WP_MySQL_Lexer( $sql, 80400, $sql_modes );
+		$this->assertTrue( $lexer->next_token() );
+
+		$token = $lexer->get_token();
+		$this->assertSame( $expected_token_id, $token->id, $sql );
+		$this->assertSame( $expected_value, $token->get_value(), $sql );
+	}
+
+	public function data_quoted_identifier_backslash(): array {
+		$bs = chr( 92 ); // A single backslash.
+		$bt = '`';
+		$dq = '"';
+		$sq = "'";
+		return array(
+			// Backtick identifiers: backslash is a literal character.
+			'backtick keeps backslash-n literal'    => array( $bt . 'a' . $bs . 'nb' . $bt, array(), WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, 'a' . $bs . 'nb' ),
+			'backtick allows trailing backslash'    => array( $bt . 'a' . $bs . $bt, array(), WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, 'a' . $bs ),
+			'backtick escapes only by doubling'     => array( $bt . 'a' . $bt . $bt . 'b' . $bt, array(), WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, 'a' . $bt . 'b' ),
+
+			// ANSI-quoted identifiers behave like backtick identifiers.
+			'ansi-quoted keeps backslash literal'   => array( $dq . 'a' . $bs . 'nb' . $dq, array( 'ANSI_QUOTES' ), WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, 'a' . $bs . 'nb' ),
+			'ansi-quoted allows trailing backslash' => array( $dq . 'a' . $bs . $dq, array( 'ANSI_QUOTES' ), WP_MySQL_Lexer::BACK_TICK_QUOTED_ID, 'a' . $bs ),
+
+			// String literals still process backslash escapes.
+			'single-quoted string escapes newline'  => array( $sq . 'a' . $bs . 'nb' . $sq, array(), WP_MySQL_Lexer::SINGLE_QUOTED_TEXT, "a\nb" ),
+		);
+	}
+
 	private function get_token_names( array $token_types ): array {
 		return array_map(
 			function ( $token_type ) {
