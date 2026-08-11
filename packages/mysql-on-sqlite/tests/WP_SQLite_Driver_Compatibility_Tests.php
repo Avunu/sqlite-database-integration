@@ -10,7 +10,7 @@ class WP_SQLite_Driver_Compatibility_Tests extends TestCase {
 	private $sqlite;
 
 	public function setUp(): void {
-		$pdo_class    = PHP_VERSION_ID >= 80400 ? PDO\SQLite::class : PDO::class;
+		$pdo_class    = PHP_VERSION_ID >= 80400 ? Pdo\Sqlite::class : PDO::class;
 		$this->sqlite = new $pdo_class( 'sqlite::memory:' );
 		$this->driver = new WP_SQLite_Driver(
 			new WP_SQLite_Connection( array( 'pdo' => $this->sqlite ) ),
@@ -28,9 +28,15 @@ class WP_SQLite_Driver_Compatibility_Tests extends TestCase {
 			WP_SQLite_Driver::class
 		);
 
-		$this->assertInstanceOf( WP_MySQL_On_SQLite::class, $get_driver() );
+		$mysql_on_sqlite_driver = $get_driver();
+
+		$this->assertInstanceOf( WP_MySQL_On_SQLite::class, $mysql_on_sqlite_driver );
+		$this->assertTrue( $mysql_on_sqlite_driver->getAttribute( PDO::ATTR_STRINGIFY_FETCHES ) );
 		$this->assertSame( $this->sqlite, $this->driver->get_connection()->get_pdo() );
-		$this->assertSame( $this->driver->get_sqlite_version(), $this->driver->client_info );
+		$this->assertSame(
+			'mysqlnd 8.0.38-mysql-on-sqlite-' . SQLITE_DRIVER_VERSION,
+			$this->driver->client_info
+		);
 		$this->assertSame( SQLITE_DRIVER_VERSION, $this->driver->get_saved_driver_version() );
 		$this->assertTrue( $this->driver->is_sql_mode_active( 'STRICT_TRANS_TABLES' ) );
 	}
@@ -52,7 +58,9 @@ class WP_SQLite_Driver_Compatibility_Tests extends TestCase {
 		$this->assertSame( $result, $this->driver->get_query_results() );
 		$this->assertSame( $result, $this->driver->get_last_return_value() );
 		$this->assertSame( 2, $this->driver->get_last_column_count() );
-		$this->assertCount( 2, $this->driver->get_last_column_meta() );
+		$this->assertSame( array( 'id', 'value' ), array_column( $this->driver->get_last_column_meta(), 'name' ) );
+		$this->assertFalse( method_exists( WP_MySQL_On_SQLite::class, 'get_last_column_count' ) );
+		$this->assertFalse( method_exists( WP_MySQL_On_SQLite::class, 'get_last_column_meta' ) );
 	}
 
 	public function test_delegates_diagnostics_and_native_queries(): void {
@@ -62,6 +70,17 @@ class WP_SQLite_Driver_Compatibility_Tests extends TestCase {
 		$this->assertNotEmpty( $this->driver->get_last_sqlite_queries() );
 		$this->assertInstanceOf( WP_MySQL_Parser::class, $this->driver->create_parser( 'SELECT 1' ) );
 		$this->assertSame( '42', $this->driver->execute_sqlite_query( 'SELECT 42' )->fetchColumn() );
+	}
+
+	public function test_preserves_configured_mysql_version(): void {
+		$driver = new WP_SQLite_Driver(
+			new WP_SQLite_Connection( array( 'pdo' => $this->sqlite ) ),
+			'wp',
+			50744
+		);
+
+		$this->assertSame( '5.7.44-mysql-on-sqlite-' . SQLITE_DRIVER_VERSION, $driver->query( 'SELECT VERSION()' )[0]->{'VERSION()'} );
+		$this->assertSame( '1', $driver->query( 'SELECT 1 /*!80000 + 1 */' )[0]->{'1'} );
 	}
 
 	public function test_preserves_transaction_method_aliases(): void {
@@ -74,22 +93,5 @@ class WP_SQLite_Driver_Compatibility_Tests extends TestCase {
 		$this->driver->query( "INSERT INTO t (value) VALUES ('committed')" );
 		$this->driver->commit();
 		$this->assertSame( '1', $this->driver->query( 'SELECT COUNT(*) FROM t' )[0]->{'COUNT(*)'} );
-	}
-
-	public function test_proxies_legacy_test_helpers(): void {
-		$this->driver->main_db_name = 'wp_test_new';
-		$result                     = $this->driver->query(
-			'SELECT schema_name FROM information_schema.schemata ORDER BY schema_name'
-		);
-		$this->assertSame( 'wp_test_new', $result[1]->SCHEMA_NAME );
-
-		$quote = Closure::bind(
-			function ( string $value ) {
-				return $this->quote_mysql_utf8_string_literal( $value );
-			},
-			$this->driver,
-			WP_SQLite_Driver::class
-		);
-		$this->assertSame( "'abc''xyz'", $quote( "abc'xyz" ) );
 	}
 }

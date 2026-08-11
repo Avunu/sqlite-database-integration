@@ -107,13 +107,13 @@ class WP_MySQL_On_SQLite_Query_Tests extends TestCase {
 		global $tables;
 		$queries = explode( ';', $tables );
 
-		$pdo_class    = PHP_VERSION_ID >= 80400 ? PDO\SQLite::class : PDO::class;
+		$pdo_class    = PHP_VERSION_ID >= 80400 ? Pdo\Sqlite::class : PDO::class;
 		$this->sqlite = new $pdo_class( 'sqlite::memory:' );
 		$this->engine = new WP_MySQL_On_SQLite(
 			'mysql-on-sqlite:dbname=wp',
 			null,
 			null,
-			array( 'pdo' => $this->sqlite )
+			array( 'sqlite_pdo' => $this->sqlite )
 		);
 		$this->engine->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
 
