@@ -12,7 +12,10 @@
  *   - No user-defined functions are registered; SQL using them fails.
  *   - Batches execute atomically, rolling back on failure.
  *   - Values round-trip through JSON, reproducing the type coercion of
- *     the HTTP protocol.
+ *     the HTTP protocol. Note that the values are read from PDO SQLite,
+ *     which always stringifies before PHP 8.1; native value types cannot
+ *     be reproduced there. The real transports decode JSON directly and
+ *     are unaffected.
  *   - Reads report accurate column names with zeroed write meta; writes
  *     report accurate meta (changes/last_row_id).
  *

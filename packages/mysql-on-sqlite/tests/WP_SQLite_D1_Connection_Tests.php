@@ -249,6 +249,16 @@ class WP_SQLite_D1_Connection_Tests extends TestCase {
 		$this->assertSame( '123', $connection->query( 'SELECT 123' )->fetchColumn() );
 
 		$connection->set_attribute( PDO::ATTR_STRINGIFY_FETCHES, false );
+
+		/*
+		 * A real D1 database carries native JSON types, but the fake transport
+		 * reads them from PDO SQLite, which always stringifies before PHP 8.1.
+		 * Only the stringified half of this test is meaningful there.
+		 */
+		if ( PHP_VERSION_ID < 80100 ) {
+			$this->assertSame( '123', $connection->query( 'SELECT 123' )->fetchColumn() );
+			return;
+		}
 		$this->assertSame( 123, $connection->query( 'SELECT 123' )->fetchColumn() );
 	}
 

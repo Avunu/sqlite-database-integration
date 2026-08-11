@@ -106,6 +106,7 @@ function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): v
 		'strict messages'  => 'Strict mode error messages differ without user-defined functions.',
 		'PHP evaluation'   => 'The function requires constant arguments without user-defined functions.',
 		'column metadata'  => 'Detailed column metadata is not carried by the D1 protocol.',
+		'native types'     => 'The fake transport cannot carry native value types before PHP 8.1.',
 	);
 
 	$skip_list = wp_sqlite_tests_d1_skip_list();
@@ -183,5 +184,22 @@ function wp_sqlite_tests_d1_skip_list(): array {
 		'WP_MySQL_On_SQLite_Tests::testColumnInfoWithZeroRows' => 'column metadata',
 		'WP_MySQL_On_SQLite_Tests::testColumnInfoWithZeroRowsPhpBug' => 'column metadata',
 	);
+
+	/*
+	 * A real D1 database carries native JSON types, which the driver relies on
+	 * to tell a numeric "SET sql_mode = 16" from a mode name list. The fake
+	 * transport reads its values from PDO SQLite, which always stringifies
+	 * before PHP 8.1, so it cannot reproduce them there. This is a limitation
+	 * of the test double alone: json_decode() yields native types on every
+	 * supported PHP version, so the real transports are unaffected.
+	 */
+	if ( PHP_VERSION_ID < 80100 ) {
+		$list['WP_MySQL_On_SQLite_Tests::testSqlModesAcceptNumericBitmap']             = 'native types';
+		$list['WP_MySQL_On_SQLite_Tests::testMySQL8PreservesNotUsedSqlModeBit']        = 'native types';
+		$list['WP_MySQL_On_SQLite_Tests::testRemovedSqlModeBitmapThrowsMySQLError']    = 'native types';
+		$list['WP_MySQL_On_SQLite_Tests::testSqlModeRejectsIncorrectValueType']        = 'native types';
+		$list['WP_MySQL_On_SQLite_Tests::testNoBackslashEscapesSqlModeIsNotSupported'] = 'native types';
+	}
+
 	return $list;
 }

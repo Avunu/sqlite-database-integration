@@ -45,6 +45,20 @@ class WP_PDO_Array_Statement_Tests extends TestCase {
 		array $columns = self::COLUMNS,
 		array $rows = self::ROWS
 	): PDOStatement {
+		/*
+		 * PDO SQLite gained native value types in PHP 8.1. Before that it
+		 * always stringifies, and it does so from SQLite's own text rendering
+		 * rather than from a PHP value, so a float reads as "1230.0" instead
+		 * of "1230" and every column reports PDO::PARAM_STR. The array
+		 * statement implements the current semantics, which the older
+		 * extension cannot express, so it has no oracle to compare against.
+		 */
+		if ( PHP_VERSION_ID < 80100 ) {
+			$this->markTestSkipped(
+				'PDO SQLite cannot report native value types before PHP 8.1, so it cannot serve as an oracle.'
+			);
+		}
+
 		$pdo = new PDO( 'sqlite::memory:' );
 		$pdo->setAttribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
 		$pdo->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, $stringify );

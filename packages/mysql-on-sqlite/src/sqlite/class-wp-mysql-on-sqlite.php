@@ -5101,6 +5101,27 @@ class WP_MySQL_On_SQLite extends PDO {
 					$this->translate( $nodes[0] ),
 					$this->translate( $nodes[1] )
 				);
+			case WP_MySQL_Lexer::IF_SYMBOL:
+				/*
+				 * IF() is a reserved word, so it is parsed as a runtime function
+				 * call rather than a plain function call, and never reaches
+				 * "translate_function_call_without_udfs()". With user-defined
+				 * function support it resolves to the "if" UDF. Without it, a
+				 * CASE expression is the portable equivalent: SQLite only gained
+				 * IIF() in 3.32.0, and an "if" alias for it in 3.48.0.
+				 *
+				 * As in MySQL, a NULL condition selects the "else" branch.
+				 */
+				if ( $this->supports_udfs ) {
+					return $this->translate_sequence( $node->get_children() );
+				}
+				$nodes = $node->get_child_nodes();
+				return sprintf(
+					'CASE WHEN %s THEN %s ELSE %s END',
+					$this->translate( $nodes[0] ),
+					$this->translate( $nodes[1] ),
+					$this->translate( $nodes[2] )
+				);
 			default:
 				return $this->translate_sequence( $node->get_children() );
 		}
@@ -5315,10 +5336,19 @@ class WP_MySQL_On_SQLite extends PDO {
 				 * The ISO week is computed from the day-of-year of the
 				 * Thursday in the date's week ("STRFTIME('%V')" would need
 				 * SQLite 3.46+).
+				 *
+				 * Mode 0 is computed the same way "%U" is defined, for the
+				 * same reason: that specifier also needs SQLite 3.46+.
+				 * With a 0-based day of the year and a 0-based weekday
+				 * starting on Sunday, the week number is
+				 * "(day_of_year + 7 - weekday) / 7", truncated.
 				 */
 				$mode = $args[1] ?? '0';
 				if ( '0' === $mode ) {
-					return sprintf( "CAST(STRFTIME('%%U', %s) AS INTEGER)", $args[0] );
+					return sprintf(
+						"((CAST(STRFTIME('%%j', %1\$s) AS INTEGER) + 6 - CAST(STRFTIME('%%w', %1\$s) AS INTEGER)) / 7)",
+						$args[0]
+					);
 				}
 				if ( '1' === $mode ) {
 					return sprintf(
@@ -5330,10 +5360,11 @@ class WP_MySQL_On_SQLite extends PDO {
 					'WEEK() with a mode other than 0 or 1 (the connection does not support user-defined functions)'
 				);
 			case 'UNIX_TIMESTAMP':
+				// STRFTIME('%s') rather than UNIXEPOCH(), which needs SQLite 3.38+.
 				if ( 0 === count( $args ) ) {
-					return "UNIXEPOCH('now')";
+					return "CAST(STRFTIME('%s', 'now') AS INTEGER)";
 				}
-				return sprintf( 'UNIXEPOCH(%s)', $args[0] );
+				return sprintf( "CAST(STRFTIME('%%s', %s) AS INTEGER)", $args[0] );
 			case 'FROM_UNIXTIME':
 				if ( 1 === count( $args ) ) {
 					return sprintf( "DATETIME(%s, 'unixepoch')", $args[0] );
@@ -5364,8 +5395,6 @@ class WP_MySQL_On_SQLite extends PDO {
 				return "TIME('now')";
 			case 'ISNULL':
 				return sprintf( '(%s IS NULL)', $args[0] );
-			case 'IF':
-				return sprintf( 'IIF(%s, %s, %s)', $args[0], $args[1], $args[2] );
 			case 'FIELD':
 				$fragment = sprintf( 'CASE %s', $args[0] );
 				for ( $i = 1; $i < count( $args ); $i++ ) {
@@ -5380,13 +5409,29 @@ class WP_MySQL_On_SQLite extends PDO {
 				if ( 2 === count( $args ) ) {
 					return sprintf( 'INSTR(%s, %s)', $args[1], $args[0] );
 				}
+				// A CASE expression rather than IIF(), which needs SQLite 3.32+.
 				return sprintf(
-					'IIF(INSTR(SUBSTR(%2$s, %3$s), %1$s) = 0, 0, INSTR(SUBSTR(%2$s, %3$s), %1$s) + %3$s - 1)',
+					'CASE WHEN INSTR(SUBSTR(%2$s, %3$s), %1$s) = 0 THEN 0 ELSE INSTR(SUBSTR(%2$s, %3$s), %1$s) + %3$s - 1 END',
 					$args[0],
 					$args[1],
 					$args[2]
 				);
 			case 'LOG':
+				/*
+				 * SQLite's LN() is one of the math functions, available only
+				 * from SQLite 3.35.0 and only when the library was compiled
+				 * with SQLITE_ENABLE_MATH_FUNCTIONS, which is not guaranteed.
+				 * Constant arguments are evaluated in PHP so that the common
+				 * cases work on every supported SQLite build; other arguments
+				 * still compile to LN() and need a math-enabled library.
+				 */
+				$constants = array();
+				foreach ( $args as $arg ) {
+					$constants[] = $this->get_numeric_literal_value( $arg );
+				}
+				if ( ! in_array( null, $constants, true ) ) {
+					return $this->evaluate_logarithm( $constants );
+				}
 				if ( 1 === count( $args ) ) {
 					return sprintf( 'LN(%s)', $args[0] );
 				}
@@ -5513,6 +5558,52 @@ class WP_MySQL_On_SQLite extends PDO {
 			return str_replace( "''", "'", $matches[1] );
 		}
 		return null;
+	}
+
+	/**
+	 * Extract the value of a translated SQLite numeric literal expression.
+	 *
+	 * @param  string $expression The translated SQLite expression.
+	 * @return float|null         The numeric value, or null when the
+	 *                            expression is not a plain numeric literal.
+	 */
+	private function get_numeric_literal_value( string $expression ): ?float {
+		if ( 1 === preg_match( '/^-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$/', $expression ) ) {
+			return (float) $expression;
+		}
+		return null;
+	}
+
+	/**
+	 * Evaluate a MySQL LOG() call over constant arguments.
+	 *
+	 * As in MySQL, out-of-domain arguments produce NULL rather than an error:
+	 * a non-positive value, and for the two-argument form, a base that is not
+	 * positive or that equals 1.
+	 *
+	 * @param  float[] $args The constant argument values, as per MySQL LOG().
+	 * @return string        The SQLite literal for the result.
+	 */
+	private function evaluate_logarithm( array $args ): string {
+		if ( 1 === count( $args ) ) {
+			$base  = M_E;
+			$value = $args[0];
+		} else {
+			$base  = $args[0];
+			$value = $args[1];
+		}
+
+		if ( $value <= 0 || $base <= 0 || 1.0 === $base ) {
+			return 'NULL';
+		}
+
+		$result = M_E === $base ? log( $value ) : log( $value ) / log( $base );
+
+		/*
+		 * A locale-independent representation with enough precision to
+		 * round-trip a double, matching how SQLite renders REAL values.
+		 */
+		return rtrim( rtrim( sprintf( '%.17G', $result ), '0' ), '.' );
 	}
 
 	/**
