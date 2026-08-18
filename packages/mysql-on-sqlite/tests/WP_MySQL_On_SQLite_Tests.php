@@ -697,6 +697,7 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 		$this->assertQuery(
 			"CREATE TABLE _tmp_bit_defaults (
 				id INT DEFAULT 0,
+				empty_string BIT(1) DEFAULT '',
 				quoted_zero BIT(1) DEFAULT '0',
 				integer_five BIT(4) DEFAULT 5,
 				bit_literal_five BIT(4) DEFAULT b'0101',
@@ -711,6 +712,7 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 		$this->assertQuery( 'SHOW CREATE TABLE _tmp_bit_defaults;' );
 		$results      = $this->last_result;
 		$create_table = $results[0]->{'Create Table'};
+		$this->assertStringContainsString( "`empty_string` bit(1) DEFAULT b'0'", $create_table );
 		$this->assertStringContainsString( "`quoted_zero` bit(1) DEFAULT b'0'", $create_table );
 		$this->assertStringContainsString( "`integer_five` bit(4) DEFAULT b'101'", $create_table );
 		$this->assertStringContainsString( "`bit_literal_five` bit(4) DEFAULT b'101'", $create_table );
@@ -727,6 +729,7 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 			array(
 				(object) array(
 					'id'                 => '1',
+					'empty_string'       => '0',
 					'quoted_zero'        => '0',
 					'integer_five'       => '5',
 					'bit_literal_five'   => '5',
@@ -738,6 +741,64 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 				),
 			),
 			$results
+		);
+	}
+
+	/**
+	 * @dataProvider invalidBitDefaultQueries
+	 */
+	public function testRejectsInvalidBitDefaultValues( string $query, string $column_name ): void {
+		$this->assertQuery( 'CREATE TABLE _tmp_invalid_bit_default (id INT, injected BIT(1))' );
+
+		$exception = null;
+		try {
+			$this->query( $query );
+		} catch ( WP_MySQL_On_SQLite_Exception $e ) {
+			$exception = $e;
+		}
+
+		$driver_message = sprintf( "Invalid default value for '%s'", $column_name );
+		$this->assertInstanceOf( WP_MySQL_On_SQLite_Exception::class, $exception );
+		$this->assertSame(
+			'SQLSTATE[42000]: Syntax error or access violation: 1067 ' . $driver_message,
+			$exception->getMessage()
+		);
+		$this->assertSame( '42000', $exception->getCode() );
+		$this->assertSame( array( '42000', 1067, $driver_message ), $exception->errorInfo );
+	}
+
+	public static function invalidBitDefaultQueries(): array {
+		$payload = "0,\n  PRIMARY KEY (`id`)\n); DROP TABLE users; --";
+
+		return array(
+			'CREATE TABLE'       => array(
+				"CREATE TABLE _tmp_created_invalid_bit_default (injected BIT(1) DEFAULT '$payload')",
+				'injected',
+			),
+			'ALTER TABLE ADD'    => array(
+				"ALTER TABLE _tmp_invalid_bit_default ADD COLUMN injected_2 BIT(1) DEFAULT '$payload'",
+				'injected_2',
+			),
+			'ALTER TABLE MODIFY' => array(
+				"ALTER TABLE _tmp_invalid_bit_default MODIFY COLUMN injected BIT(1) DEFAULT '$payload'",
+				'injected',
+			),
+			'bit-like string'    => array(
+				"ALTER TABLE _tmp_invalid_bit_default MODIFY COLUMN injected BIT(1) DEFAULT 'b''0''; DROP TABLE users; -- '",
+				'injected',
+			),
+			'0b-like string'     => array(
+				"ALTER TABLE _tmp_invalid_bit_default MODIFY COLUMN injected BIT(1) DEFAULT '0b0''; DROP TABLE users; -- '",
+				'injected',
+			),
+			'hex-like string'    => array(
+				"ALTER TABLE _tmp_invalid_bit_default MODIFY COLUMN injected BIT(1) DEFAULT 'x''05''; DROP TABLE users; -- '",
+				'injected',
+			),
+			'0x-like string'     => array(
+				"ALTER TABLE _tmp_invalid_bit_default MODIFY COLUMN injected BIT(1) DEFAULT '0x05; DROP TABLE users; -- '",
+				'injected',
+			),
 		);
 	}
 
