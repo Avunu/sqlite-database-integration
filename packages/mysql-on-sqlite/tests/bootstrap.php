@@ -22,8 +22,31 @@ define( 'FQDBDIR', __DIR__ . '/../testdb' );
 // Polyfill WPDB globals.
 $GLOBALS['table_prefix'] = 'wptests_';
 $GLOBALS['wpdb']         = new class() {
-	public function set_prefix( string $prefix ): void {}
+	public $blogs;
+
+	public function set_prefix( string $prefix ) {
+		if ( preg_match( '|[^a-z0-9_]|i', $prefix ) ) {
+			return new WP_Error( 'invalid_db_prefix', 'Invalid database prefix' );
+		}
+
+		$this->blogs = $prefix . 'blogs';
+		return $prefix;
+	}
 };
+
+if ( ! class_exists( 'WP_Error' ) ) {
+	class WP_Error {
+		private $message;
+
+		public function __construct( $code, $message ) {
+			$this->message = $message;
+		}
+
+		public function get_error_message() {
+			return $this->message;
+		}
+	}
+}
 
 /**
  * Polyfills for WordPress functions
