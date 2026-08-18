@@ -13,20 +13,17 @@
 class WP_SQLite_PDO_User_Defined_Functions {
 
 	/**
-	 * Register the user-defined SQLite functions on a PDO connection.
+	 * Register the user-defined SQLite functions on a connection.
 	 *
-	 * The functions are registered using PDO::sqliteCreateFunction().
+	 * The functions are implemented as PHP callbacks and registered using
+	 * the "create_function()" method of the SQLite connection interface.
 	 *
-	 * @param PDO|Pdo\Sqlite $pdo The PDO object.
+	 * @param WP_SQLite_Connection_Interface $connection The SQLite connection.
 	 */
-	public static function register_for( $pdo ): self {
+	public static function register_for( WP_SQLite_Connection_Interface $connection ): self {
 		$instance = new self();
 		foreach ( $instance->functions as $f => $t ) {
-			if ( $pdo instanceof Pdo\Sqlite ) {
-				$pdo->createFunction( $f, array( $instance, $t ) );
-			} else {
-				$pdo->sqliteCreateFunction( $f, array( $instance, $t ) );
-			}
+			$connection->create_function( $f, array( $instance, $t ) );
 		}
 		return $instance;
 	}

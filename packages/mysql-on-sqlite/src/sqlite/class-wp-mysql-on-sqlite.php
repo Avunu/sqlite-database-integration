@@ -83,12 +83,6 @@ class WP_MySQL_On_SQLite extends PDO {
 	const GLOBAL_VARIABLES_TABLE_NAME = self::RESERVED_PREFIX . 'global_variables';
 
 	/**
-	 * Name of the connection-private TEMP table used to build empty result sets
-	 * without acquiring a write lock on the database. See create_result_statement_from_data().
-	 */
-	private const EMPTY_RESULT_TABLE_NAME = self::RESERVED_PREFIX . 'empty_result';
-
-	/**
 	 * The name of the SQLite driver version variable.
 	 *
 	 * This internal variable is used to store the latest version of the SQLite
@@ -549,7 +543,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	/**
 	 * An instance of the SQLite connection.
 	 *
-	 * @var WP_SQLite_Connection
+	 * @var WP_SQLite_Connection_Interface
 	 */
 	private $connection;
 
@@ -597,9 +591,22 @@ class WP_MySQL_On_SQLite extends PDO {
 	/**
 	 * User-defined functions registered on the SQLite connection.
 	 *
-	 * @var WP_SQLite_PDO_User_Defined_Functions
+	 * This is null for connections without user-defined function support.
+	 *
+	 * @var WP_SQLite_PDO_User_Defined_Functions|null
 	 */
 	private $user_defined_functions;
+
+	/**
+	 * Whether the connection supports user-defined functions.
+	 *
+	 * When it does not, MySQL functions that are normally emulated with
+	 * user-defined SQL functions are translated to plain SQLite expressions
+	 * where possible. See the "translate_function_call_without_udfs()" method.
+	 *
+	 * @var bool
+	 */
+	private $supports_udfs = true;
 
 	/**
 	 * A service for managing MySQL INFORMATION_SCHEMA tables in SQLite.
@@ -679,14 +686,6 @@ class WP_MySQL_On_SQLite extends PDO {
 	private $is_readonly;
 
 	/**
-	 * Whether the TEMP table backing empty result sets has been created on this
-	 * connection. See create_result_statement_from_data().
-	 *
-	 * @var bool
-	 */
-	private $empty_result_table_ready = false;
-
-	/**
 	 * Type of wrapper transaction that is active for the MySQL query emulation.
 	 *
 	 * Possible values:
@@ -699,19 +698,6 @@ class WP_MySQL_On_SQLite extends PDO {
 	private $wrapper_transaction_type = null;
 
 	/**
-	 * Whether an SQLite transaction is active in the current session.
-	 *
-	 * This is a polyfill of the "PDO::inTransaction()" method for PHP < 8.4,
-	 * where the "PDO::inTransaction()" method is not reliable with SQLite.
-	 *
-	 * @see https://bugs.php.net/bug.php?id=81227
-	 * @see https://github.com/php/php-src/pull/14268
-	 *
-	 * @var bool
-	 */
-	private $in_transaction = false;
-
-	/**
 	 * Whether a MySQL table lock is active.
 	 *
 	 * Set to "true" when a lock is acquired using the MySQL LOCK statement.
@@ -720,6 +706,25 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @var bool
 	 */
 	private $table_lock_active = false;
+
+	/**
+	 * Fallback behavior for connections without transaction support.
+	 *
+	 * One of "warn", "error", or "ignore".
+	 * See the "handle_unsupported_transaction_statement()" method.
+	 *
+	 * @var string
+	 */
+	private $transaction_fallback = 'warn';
+
+	/**
+	 * Whether an unsupported transaction warning was already issued.
+	 *
+	 * This is used to trigger the warning only once per driver instance.
+	 *
+	 * @var bool
+	 */
+	private $transaction_fallback_warning_issued = false;
 
 	/**
 	 * The PDO fetch mode used for the emulated query.
@@ -780,6 +785,9 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *     Driver-specific PDO options are not supported.
 	 *
 	 *     @type int             $mysql_version       Optional. MySQL version to emulate. Default 80038.
+	 *     @type object|null     $sqlite_connection   Optional. An existing WP_SQLite_Connection_Interface
+	 *                                                instance to run queries through. Takes precedence
+	 *                                                over "sqlite_pdo" and the DSN path.
 	 *     @type PDO|null        $sqlite_pdo          Optional. Existing PDO SQLite connection.
 	 *     @type string|null     $sqlite_journal_mode Optional. SQLite journal mode. Default 'WAL'.
 	 *     @type string|int|null $sqlite_synchronous  Optional. SQLite synchronous setting.
@@ -845,7 +853,6 @@ class WP_MySQL_On_SQLite extends PDO {
 			);
 		}
 
-		// Create a new SQLite connection.
 		$pdo_options = array_filter(
 			$options,
 			function ( $key ) {
@@ -861,17 +868,25 @@ class WP_MySQL_On_SQLite extends PDO {
 			unset( $pdo_options[ PDO::ATTR_PERSISTENT ] );
 		}
 
-		$connection_options = array(
-			'journal_mode' => $options['sqlite_journal_mode'] ?? null,
-			'synchronous'  => $options['sqlite_synchronous'] ?? null,
-			'pdo_options'  => $connection_pdo_options,
-		);
-		if ( isset( $options['sqlite_pdo'] ) ) {
-			$connection_options['pdo'] = $options['sqlite_pdo'];
+		// Use the provided SQLite connection, or create a new one.
+		if (
+			isset( $options['sqlite_connection'] )
+			&& $options['sqlite_connection'] instanceof WP_SQLite_Connection_Interface
+		) {
+			$this->connection = $options['sqlite_connection'];
 		} else {
-			$connection_options['path'] = $path;
+			$connection_options = array(
+				'journal_mode' => $options['sqlite_journal_mode'] ?? null,
+				'synchronous'  => $options['sqlite_synchronous'] ?? null,
+				'pdo_options'  => $connection_pdo_options,
+			);
+			if ( isset( $options['sqlite_pdo'] ) ) {
+				$connection_options['pdo'] = $options['sqlite_pdo'];
+			} else {
+				$connection_options['path'] = $path;
+			}
+			$this->connection = new WP_SQLite_Connection( $connection_options );
 		}
-		$this->connection = new WP_SQLite_Connection( $connection_options );
 
 		$this->mysql_version = $mysql_version;
 		$this->main_db_name  = $db_name;
@@ -936,8 +951,15 @@ class WP_MySQL_On_SQLite extends PDO {
 		// Enable foreign keys. By default, they are off.
 		$this->connection->query( 'PRAGMA foreign_keys = ON' );
 
+		// Configure the fallback behavior for connections without transaction
+		// support. One of "warn" (default), "error", or "ignore".
+		$this->transaction_fallback = $options['transaction_fallback'] ?? 'warn';
+
 		// Register SQLite functions.
-		$this->user_defined_functions = WP_SQLite_PDO_User_Defined_Functions::register_for( $this->connection->get_pdo() );
+		$this->supports_udfs = $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_USER_DEFINED_FUNCTIONS );
+		if ( $this->supports_udfs ) {
+			$this->user_defined_functions = WP_SQLite_PDO_User_Defined_Functions::register_for( $this->connection );
+		}
 
 		// Load MySQL grammar.
 		if ( null === self::$mysql_grammar ) {
@@ -1387,16 +1409,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return bool True if a transaction is active, false otherwise.
 	 */
 	public function inTransaction(): bool {
-		if ( PHP_VERSION_ID < 80400 ) {
-			/*
-			 * On PHP < 8.4, the "PDO::inTransaction()" method is not reliable.
-			 *
-			 * @see https://bugs.php.net/bug.php?id=81227
-			 * @see https://github.com/php/php-src/pull/14268
-			 */
-			return $this->in_transaction;
-		}
-		return $this->connection->get_pdo()->inTransaction();
+		return $this->connection->in_transaction();
 	}
 
 	/**
@@ -1419,17 +1432,16 @@ class WP_MySQL_On_SQLite extends PDO {
 
 		// Track the caller's error mode while keeping internal SQLite operations in exception mode.
 		if ( PDO::ATTR_ERRMODE === $attribute ) {
-			$pdo    = $this->connection->get_pdo();
-			$result = $pdo->setAttribute( $attribute, $value );
+			$result = $this->connection->set_attribute( $attribute, $value );
 			if ( ! $result ) {
 				return false;
 			}
-			$this->error_mode = $pdo->getAttribute( PDO::ATTR_ERRMODE );
-			$pdo->setAttribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
+			$this->error_mode = $this->connection->get_attribute( PDO::ATTR_ERRMODE );
+			$this->connection->set_attribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
 			return true;
 		}
 
-		$result = $this->connection->get_pdo()->setAttribute( $attribute, $value );
+		$result = $this->connection->set_attribute( $attribute, $value );
 		if ( $result && PDO::ATTR_STRINGIFY_FETCHES === $attribute ) {
 			$this->stringify_fetches = (bool) $value;
 		}
@@ -1461,7 +1473,7 @@ class WP_MySQL_On_SQLite extends PDO {
 			// PDO SQLite cannot report this attribute before PHP 8.2.
 			return $this->stringify_fetches;
 		}
-		return $this->connection->get_pdo()->getAttribute( $attribute );
+		return $this->connection->get_attribute( $attribute );
 	}
 
 	/**
@@ -1470,9 +1482,22 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * Exposes the PDO SQLite connection for advanced use, bypassing MySQL emulation.
 	 * Do not retain it across reconnections or modify driver-owned state.
 	 *
+	 * Only connections backed by a local PDO SQLite handle can expose one. Remote
+	 * backends, such as the Cloudflare D1 connection, have no PDO instance to give.
+	 *
 	 * @return PDO The underlying PDO SQLite instance.
+	 *
+	 * @throws WP_MySQL_On_SQLite_Exception When the connection is not PDO-backed.
 	 */
 	public function get_sqlite_pdo(): PDO {
+		if ( ! $this->connection instanceof WP_SQLite_Connection ) {
+			throw $this->new_driver_exception(
+				sprintf(
+					'The "%s" connection is not backed by a PDO SQLite instance.',
+					get_class( $this->connection )
+				)
+			);
+		}
 		return $this->connection->get_pdo();
 	}
 
@@ -1481,9 +1506,9 @@ class WP_MySQL_On_SQLite extends PDO {
 	 *
 	 * @access private
 	 *
-	 * @return WP_SQLite_Connection
+	 * @return WP_SQLite_Connection_Interface
 	 */
-	public function get_connection(): WP_SQLite_Connection {
+	public function get_connection(): WP_SQLite_Connection_Interface {
 		return $this->connection;
 	}
 
@@ -1493,7 +1518,7 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return string SQLite engine version as a string.
 	 */
 	public function get_sqlite_version(): string {
-		return $this->connection->get_pdo()->getAttribute( PDO::ATTR_SERVER_VERSION );
+		return $this->connection->get_server_version();
 	}
 
 	/**
@@ -2029,23 +2054,24 @@ class WP_MySQL_On_SQLite extends PDO {
 			return;
 		}
 
-		$wrapper_transaction_type = $this->wrapper_transaction_type;
+		/*
+		 * Without transaction support, single statements are the unit of
+		 * atomicity, and multi-statement emulations are executed without
+		 * a wrapper transaction (with batching used where possible).
+		 */
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TRANSACTIONS ) ) {
+			return;
+		}
+
 		if ( $this->inTransaction() ) {
-			$savepoint_name           = $this->get_internal_savepoint_name( 'wrapper' );
-			$stmt                     = $this->connection->prepare( sprintf( 'SAVEPOINT %s', $savepoint_name ) );
-			$wrapper_transaction_type = 'savepoint';
+			$this->connection->savepoint( $this->get_internal_savepoint_name( 'wrapper' ) );
+			$this->wrapper_transaction_type = 'savepoint';
 		} else {
 			// For write transactions, we must use "BEGIN IMMEDIATE".
 			// @see self::begin_user_transaction() method comments.
-			$stmt                     = $this->connection->prepare( $this->is_readonly ? 'BEGIN' : 'BEGIN IMMEDIATE' );
-			$wrapper_transaction_type = 'transaction';
+			$this->connection->begin_transaction( $this->is_readonly ? 'DEFERRED' : 'IMMEDIATE' );
+			$this->wrapper_transaction_type = 'transaction';
 		}
-
-		if ( ! $stmt->execute() ) {
-			throw $this->new_driver_exception( 'Failed to begin wrapper transaction.' );
-		}
-		$this->wrapper_transaction_type = $wrapper_transaction_type;
-		$this->in_transaction           = true;
 	}
 
 	/**
@@ -2056,26 +2082,23 @@ class WP_MySQL_On_SQLite extends PDO {
 			return;
 		}
 
-		$in_transaction = $this->in_transaction;
 		if ( 'savepoint' === $this->wrapper_transaction_type ) {
-			$savepoint_name = $this->get_internal_savepoint_name( 'wrapper' );
-			$stmt           = $this->connection->prepare( sprintf( 'RELEASE SAVEPOINT %s', $savepoint_name ) );
+			$this->connection->release_savepoint( $this->get_internal_savepoint_name( 'wrapper' ) );
 		} else {
-			$stmt           = $this->connection->prepare( 'COMMIT' );
-			$in_transaction = false;
-		}
-
-		if ( ! $stmt->execute() ) {
-			throw $this->new_driver_exception( 'Failed to commit wrapper transaction.' );
+			$this->connection->commit();
 		}
 		$this->wrapper_transaction_type = null;
-		$this->in_transaction           = $in_transaction;
 	}
 
 	/**
 	 * Execute the "BEGIN" or "START TRANSACTION" MySQL statement in SQLite.
 	 */
 	private function begin_user_transaction(): void {
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TRANSACTIONS ) ) {
+			$this->handle_unsupported_transaction_statement( 'START TRANSACTION' );
+			return;
+		}
+
 		// MySQL implicitly commits previous transaction when starting a new one.
 		if ( $this->inTransaction() ) {
 			$this->commit_user_transaction();
@@ -2091,8 +2114,7 @@ class WP_MySQL_On_SQLite extends PDO {
 		 *
 		 * @see self::begin_wrapper_transaction()
 		 */
-		$this->connection->query( 'BEGIN IMMEDIATE' );
-		$this->in_transaction = true;
+		$this->connection->begin_transaction( 'IMMEDIATE' );
 	}
 
 	/**
@@ -2103,8 +2125,7 @@ class WP_MySQL_On_SQLite extends PDO {
 		if ( ! $this->inTransaction() ) {
 			return;
 		}
-		$this->connection->query( 'COMMIT' );
-		$this->in_transaction = false;
+		$this->connection->commit();
 	}
 
 	/**
@@ -2115,8 +2136,45 @@ class WP_MySQL_On_SQLite extends PDO {
 		if ( ! $this->inTransaction() ) {
 			return;
 		}
-		$this->connection->query( 'ROLLBACK' );
-		$this->in_transaction = false;
+		$this->connection->rollback();
+	}
+
+	/**
+	 * Handle a transactional MySQL statement on a connection without
+	 * transaction support.
+	 *
+	 * The behavior is configured by the "transaction_fallback" driver option:
+	 *
+	 *   - "warn"   Ignore the statement and trigger a PHP warning.
+	 *              The warning is issued only once per driver instance.
+	 *   - "error"  Throw a driver exception.
+	 *   - "ignore" Silently ignore the statement.
+	 *
+	 * Because single statements are always atomic, ignoring transactional
+	 * statements results in autocommit-like behavior: all statements take
+	 * effect immediately and a ROLLBACK cannot undo them.
+	 *
+	 * @param  string $statement          The MySQL statement type being handled.
+	 * @throws WP_MySQL_On_SQLite_Exception When the fallback behavior is "error".
+	 */
+	private function handle_unsupported_transaction_statement( string $statement ): void {
+		if ( 'error' === $this->transaction_fallback ) {
+			throw $this->new_not_supported_exception(
+				sprintf( '%s (the connection does not support transactions)', $statement )
+			);
+		}
+
+		if ( 'warn' === $this->transaction_fallback && ! $this->transaction_fallback_warning_issued ) {
+			$this->transaction_fallback_warning_issued = true;
+			trigger_error(
+				sprintf(
+					'MySQL-on-SQLite driver: "%s" was ignored. The database connection does not'
+					. ' support transactions, so all statements are committed immediately.',
+					$statement
+				),
+				E_USER_WARNING
+			);
+		}
 	}
 
 	/**
@@ -2147,25 +2205,34 @@ class WP_MySQL_On_SQLite extends PDO {
 			case 'savepointStatement':
 				$savepoint_name = $this->translate( $subnode->get_first_child_node( 'identifier' ) );
 
+				if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_SAVEPOINTS ) ) {
+					if ( null === $savepoint_name && WP_MySQL_Lexer::ROLLBACK_SYMBOL === $token->id ) {
+						$this->rollback_user_transaction();
+					} else {
+						$this->handle_unsupported_transaction_statement( 'SAVEPOINT' );
+					}
+					return;
+				}
+
 				// ROLLBACK/ROLLBACK TO SAVEPOINT <identifier>.
 				if ( WP_MySQL_Lexer::ROLLBACK_SYMBOL === $token->id ) {
 					if ( null === $savepoint_name ) {
 						$this->rollback_user_transaction();
 					} else {
-						$this->execute_sqlite_query( sprintf( 'ROLLBACK TO SAVEPOINT %s', $savepoint_name ) );
+						$this->connection->rollback_to_savepoint( $this->unquote_sqlite_identifier( $savepoint_name ) );
 					}
 					return;
 				}
 
 				// SAVEPOINT.
 				if ( WP_MySQL_Lexer::SAVEPOINT_SYMBOL === $token->id ) {
-					$this->execute_sqlite_query( sprintf( 'SAVEPOINT %s', $savepoint_name ) );
+					$this->connection->savepoint( $this->unquote_sqlite_identifier( $savepoint_name ) );
 					return;
 				}
 
 				// RELEASE SAVEPOINT.
 				if ( WP_MySQL_Lexer::RELEASE_SYMBOL === $token->id ) {
-					$this->execute_sqlite_query( sprintf( 'RELEASE SAVEPOINT %s', $savepoint_name ) );
+					$this->connection->release_savepoint( $this->unquote_sqlite_identifier( $savepoint_name ) );
 					return;
 				}
 
@@ -2847,6 +2914,14 @@ class WP_MySQL_On_SQLite extends PDO {
 
 		// Handle TEMPORARY keyword.
 		$table_is_temporary = $subnode->has_child_token( WP_MySQL_Lexer::TEMPORARY_SYMBOL );
+		if (
+			$table_is_temporary
+			&& ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TEMPORARY_TABLES )
+		) {
+			throw $this->new_not_supported_exception(
+				'CREATE TEMPORARY TABLE (the connection does not support temporary tables)'
+			);
+		}
 
 		// Handle CREATE TABLE ... [AS] SELECT.
 		$element_list = $subnode->get_first_child_node( 'tableElementList' );
@@ -2893,15 +2968,17 @@ class WP_MySQL_On_SQLite extends PDO {
 		$this->information_schema_builder->record_create_table( $node );
 
 		// Generate CREATE TABLE statement from the information schema tables.
-		$queries            = $this->get_sqlite_create_table_statement( $table_is_temporary, $table_name );
-		$create_table_query = $queries[0];
-		$constraint_queries = array_slice( $queries, 1 );
-
-		$this->execute_sqlite_query( $create_table_query );
-
-		foreach ( $constraint_queries as $query ) {
-			$this->execute_sqlite_query( $query );
-		}
+		// The statements are composed as a batch, so that backends with batch
+		// support can execute them atomically in a single call.
+		$queries = $this->get_sqlite_create_table_statement( $table_is_temporary, $table_name );
+		$this->connection->execute_batch(
+			array_map(
+				function ( $query ) {
+					return array( $query );
+				},
+				$queries
+			)
+		);
 
 		// Apply AUTO_INCREMENT = N table option, if any.
 		$this->apply_auto_increment_table_option( $table_is_temporary, $table_name, $node );
@@ -4893,10 +4970,26 @@ class WP_MySQL_On_SQLite extends PDO {
 
 		if ( true === $is_binary ) {
 			$children = $node->get_children();
-			return sprintf(
-				'GLOB _helper_like_to_glob_pattern(%s)',
-				$this->translate( $children[1] )
-			);
+			$pattern  = $this->translate( $children[1] );
+
+			if ( ! $this->supports_udfs ) {
+				// Convert constant patterns to GLOB in PHP at translation time.
+				// A trailing COLLATE clause doesn't change the literal value.
+				$literal = $pattern;
+				if ( 1 === preg_match( '/^(.*) COLLATE BINARY$/', $literal, $matches ) ) {
+					$literal = $matches[1];
+				}
+				$pattern_value = $this->get_string_literal_value( $literal );
+				if ( null === $pattern_value ) {
+					throw $this->new_not_supported_exception(
+						'LIKE BINARY with a non-constant pattern (the connection does not support user-defined functions)'
+					);
+				}
+				$helper = new WP_SQLite_PDO_User_Defined_Functions();
+				return 'GLOB ' . $this->quote_sqlite_value( $helper->_helper_like_to_glob_pattern( $pattern_value ) ) . ' COLLATE BINARY';
+			}
+
+			return sprintf( 'GLOB _helper_like_to_glob_pattern(%s)', $pattern );
 		}
 
 		/*
@@ -4932,6 +5025,13 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @throws WP_MySQL_On_SQLite_Exception When the translation fails.
 	 */
 	private function translate_regexp_functions( WP_Parser_Node $node ): string {
+		if ( ! $this->supports_udfs ) {
+			// The REGEXP operator requires the "regexp()" user-defined function.
+			throw $this->new_not_supported_exception(
+				'REGEXP (the connection does not support user-defined functions)'
+			);
+		}
+
 		$tokens    = $node->get_descendant_tokens();
 		$is_binary = isset( $tokens[1] ) && WP_MySQL_Lexer::BINARY_SYMBOL === $tokens[1]->id;
 
@@ -5001,6 +5101,27 @@ class WP_MySQL_On_SQLite extends PDO {
 					$this->translate( $nodes[0] ),
 					$this->translate( $nodes[1] )
 				);
+			case WP_MySQL_Lexer::IF_SYMBOL:
+				/*
+				 * IF() is a reserved word, so it is parsed as a runtime function
+				 * call rather than a plain function call, and never reaches
+				 * "translate_function_call_without_udfs()". With user-defined
+				 * function support it resolves to the "if" UDF. Without it, a
+				 * CASE expression is the portable equivalent: SQLite only gained
+				 * IIF() in 3.32.0, and an "if" alias for it in 3.48.0.
+				 *
+				 * As in MySQL, a NULL condition selects the "else" branch.
+				 */
+				if ( $this->supports_udfs ) {
+					return $this->translate_sequence( $node->get_children() );
+				}
+				$nodes = $node->get_child_nodes();
+				return sprintf(
+					'CASE WHEN %s THEN %s ELSE %s END',
+					$this->translate( $nodes[0] ),
+					$this->translate( $nodes[1] ),
+					$this->translate( $nodes[2] )
+				);
 			default:
 				return $this->translate_sequence( $node->get_children() );
 		}
@@ -5044,6 +5165,11 @@ class WP_MySQL_On_SQLite extends PDO {
 				 */
 				if ( 0 === count( $args ) ) {
 					return '((RANDOM() & ((1 << 53) - 1)) / ((1 << 53) * 1.0))';
+				}
+				if ( ! $this->supports_udfs ) {
+					throw $this->new_not_supported_exception(
+						'RAND(N) with a seed (the connection does not support user-defined functions)'
+					);
 				}
 				return $this->translate_sequence( $node->get_children() );
 			case 'DATE_FORMAT':
@@ -5111,6 +5237,12 @@ class WP_MySQL_On_SQLite extends PDO {
 			case 'VERSION':
 				return $this->quote_sqlite_value( $this->get_mysql_server_version_string() );
 			default:
+				if ( ! $this->supports_udfs ) {
+					$rewritten = $this->translate_function_call_without_udfs( $name, $args );
+					if ( null !== $rewritten ) {
+						return $rewritten;
+					}
+				}
 				return $this->translate_sequence( $node->get_children() );
 		}
 	}
@@ -5149,6 +5281,353 @@ class WP_MySQL_On_SQLite extends PDO {
 	 */
 	private function get_mysql_server_version_comment(): string {
 		return 'MySQL on SQLite';
+	}
+
+	/**
+	 * Translate a MySQL function that is normally emulated with a user-defined
+	 * SQL function to a plain SQLite expression.
+	 *
+	 * This is used for connections without user-defined function support,
+	 * such as remote SQLite databases (e.g. Cloudflare D1), where PHP
+	 * callbacks cannot run inside the database. Some functions can only be
+	 * rewritten when their arguments are constant string literals; these
+	 * are then evaluated in PHP at translation time.
+	 *
+	 * @param  string   $name The uppercase MySQL function name.
+	 * @param  string[] $args The translated SQLite argument expressions.
+	 * @return string|null    The rewritten SQLite expression, or null when
+	 *                        the function is not emulated with a UDF and
+	 *                        should be passed through unchanged.
+	 * @throws WP_MySQL_On_SQLite_Exception When the function cannot be used
+	 *                                    without user-defined functions.
+	 */
+	private function translate_function_call_without_udfs( string $name, array $args ): ?string {
+		switch ( $name ) {
+			case 'MONTH':
+			case 'MONTHNUM':
+				return sprintf( "CAST(STRFTIME('%%m', %s) AS INTEGER)", $args[0] );
+			case 'YEAR':
+				return sprintf( "CAST(STRFTIME('%%Y', %s) AS INTEGER)", $args[0] );
+			case 'DAY':
+			case 'DAYOFMONTH':
+				return sprintf( "CAST(STRFTIME('%%d', %s) AS INTEGER)", $args[0] );
+			case 'HOUR':
+				return sprintf( "CAST(STRFTIME('%%H', %s) AS INTEGER)", $args[0] );
+			case 'MINUTE':
+				return sprintf( "CAST(STRFTIME('%%M', %s) AS INTEGER)", $args[0] );
+			case 'SECOND':
+				return sprintf( "CAST(STRFTIME('%%S', %s) AS INTEGER)", $args[0] );
+			case 'DAYOFWEEK':
+				// MySQL: 1 = Sunday. SQLite "%w": 0 = Sunday.
+				return sprintf( "(CAST(STRFTIME('%%w', %s) AS INTEGER) + 1)", $args[0] );
+			case 'WEEKDAY':
+				// MySQL: 0 = Monday. SQLite "%w": 0 = Sunday.
+				return sprintf( "((CAST(STRFTIME('%%w', %s) AS INTEGER) + 6) %% 7)", $args[0] );
+			case 'WEEK':
+				/*
+				 * Mode 0 (weeks starting on Sunday) maps to the SQLite "%U"
+				 * week number. Mode 1 (weeks starting on Monday, week 1 is
+				 * the first week with 4+ days in the year) matches the ISO
+				 * week number, except in the week spanning the year
+				 * boundary, where MySQL yields 0 (early January) or 53
+				 * (late December) instead of the other year's ISO week
+				 * number. The legacy PHP emulation had the same divergence.
+				 *
+				 * The ISO week is computed from the day-of-year of the
+				 * Thursday in the date's week ("STRFTIME('%V')" would need
+				 * SQLite 3.46+).
+				 *
+				 * Mode 0 is computed the same way "%U" is defined, for the
+				 * same reason: that specifier also needs SQLite 3.46+.
+				 * With a 0-based day of the year and a 0-based weekday
+				 * starting on Sunday, the week number is
+				 * "(day_of_year + 7 - weekday) / 7", truncated.
+				 */
+				$mode = $args[1] ?? '0';
+				if ( '0' === $mode ) {
+					return sprintf(
+						"((CAST(STRFTIME('%%j', %1\$s) AS INTEGER) + 6 - CAST(STRFTIME('%%w', %1\$s) AS INTEGER)) / 7)",
+						$args[0]
+					);
+				}
+				if ( '1' === $mode ) {
+					return sprintf(
+						"((CAST(STRFTIME('%%j', DATE(%s, '-3 days', 'weekday 4')) AS INTEGER) - 1) / 7 + 1)",
+						$args[0]
+					);
+				}
+				throw $this->new_not_supported_exception(
+					'WEEK() with a mode other than 0 or 1 (the connection does not support user-defined functions)'
+				);
+			case 'UNIX_TIMESTAMP':
+				// STRFTIME('%s') rather than UNIXEPOCH(), which needs SQLite 3.38+.
+				if ( 0 === count( $args ) ) {
+					return "CAST(STRFTIME('%s', 'now') AS INTEGER)";
+				}
+				return sprintf( "CAST(STRFTIME('%%s', %s) AS INTEGER)", $args[0] );
+			case 'FROM_UNIXTIME':
+				if ( 1 === count( $args ) ) {
+					return sprintf( "DATETIME(%s, 'unixepoch')", $args[0] );
+				}
+				$format = $this->get_string_literal_value( $args[1] );
+				if ( null !== $format ) {
+					$format = $this->convert_mysql_date_format_to_strftime( $format );
+				}
+				if ( null === $format ) {
+					throw $this->new_not_supported_exception(
+						'FROM_UNIXTIME() with a non-constant or unsupported format (the connection does not support user-defined functions)'
+					);
+				}
+				return sprintf(
+					"STRFTIME(%s, %s, 'unixepoch')",
+					$this->quote_sqlite_value( $format ),
+					$args[0]
+				);
+			case 'NOW':
+			case 'LOCALTIME':
+			case 'LOCALTIMESTAMP':
+			case 'UTC_TIMESTAMP':
+				return "DATETIME('now')";
+			case 'CURDATE':
+			case 'UTC_DATE':
+				return "DATE('now')";
+			case 'UTC_TIME':
+				return "TIME('now')";
+			case 'ISNULL':
+				return sprintf( '(%s IS NULL)', $args[0] );
+			case 'FIELD':
+				$fragment = sprintf( 'CASE %s', $args[0] );
+				for ( $i = 1; $i < count( $args ); $i++ ) {
+					$fragment .= sprintf( ' WHEN %s THEN %d', $args[ $i ], $i );
+				}
+				return $fragment . ' ELSE 0 END';
+			case 'LEAST':
+				return 'MIN(' . implode( ', ', $args ) . ')';
+			case 'GREATEST':
+				return 'MAX(' . implode( ', ', $args ) . ')';
+			case 'LOCATE':
+				if ( 2 === count( $args ) ) {
+					return sprintf( 'INSTR(%s, %s)', $args[1], $args[0] );
+				}
+				// A CASE expression rather than IIF(), which needs SQLite 3.32+.
+				return sprintf(
+					'CASE WHEN INSTR(SUBSTR(%2$s, %3$s), %1$s) = 0 THEN 0 ELSE INSTR(SUBSTR(%2$s, %3$s), %1$s) + %3$s - 1 END',
+					$args[0],
+					$args[1],
+					$args[2]
+				);
+			case 'LOG':
+				/*
+				 * SQLite's LN() is one of the math functions, available only
+				 * from SQLite 3.35.0 and only when the library was compiled
+				 * with SQLITE_ENABLE_MATH_FUNCTIONS, which is not guaranteed.
+				 * Constant arguments are evaluated in PHP so that the common
+				 * cases work on every supported SQLite build; other arguments
+				 * still compile to LN() and need a math-enabled library.
+				 */
+				$constants = array();
+				foreach ( $args as $arg ) {
+					$constants[] = $this->get_numeric_literal_value( $arg );
+				}
+				if ( ! in_array( null, $constants, true ) ) {
+					return $this->evaluate_logarithm( $constants );
+				}
+				if ( 1 === count( $args ) ) {
+					return sprintf( 'LN(%s)', $args[0] );
+				}
+				return sprintf( '(LN(%s) / LN(%s))', $args[1], $args[0] );
+			case 'DATEDIFF':
+				return sprintf(
+					'CAST(JULIANDAY(DATE(%s)) - JULIANDAY(DATE(%s)) AS INTEGER)',
+					$args[0],
+					$args[1]
+				);
+			case 'UCASE':
+				return sprintf( 'UPPER(%s)', $args[0] );
+			case 'LCASE':
+				return sprintf( 'LOWER(%s)', $args[0] );
+			case 'UNHEX':
+				// A native SQLite function since 3.41.0.
+				return 'UNHEX(' . implode( ', ', $args ) . ')';
+			case 'INET_NTOA':
+				return sprintf(
+					"PRINTF('%%d.%%d.%%d.%%d', (%1\$s >> 24) & 255, (%1\$s >> 16) & 255, (%1\$s >> 8) & 255, %1\$s & 255)",
+					$args[0]
+				);
+			case 'GET_LOCK':
+			case 'RELEASE_LOCK':
+				// Advisory locks are meaningless on a single-writer database.
+				return '1';
+			case 'MD5':
+			case 'REVERSE':
+			case 'TO_BASE64':
+			case 'FROM_BASE64':
+			case 'INET_ATON':
+				// These can be evaluated in PHP for constant arguments.
+				$value = $this->get_string_literal_value( $args[0] );
+				if ( null === $value ) {
+					throw $this->new_not_supported_exception(
+						sprintf(
+							'%s() with a non-constant argument (the connection does not support user-defined functions)',
+							$name
+						)
+					);
+				}
+				switch ( $name ) {
+					case 'MD5':
+						$result = md5( $value );
+						break;
+					case 'REVERSE':
+						$result = strrev( $value );
+						break;
+					case 'TO_BASE64':
+						$result = base64_encode( $value );
+						break;
+					case 'FROM_BASE64':
+						$result = base64_decode( $value );
+						break;
+					default:
+						$result = (string) ip2long( $value );
+						break;
+				}
+				return $this->quote_sqlite_value( $result );
+			case 'REGEXP':
+			case 'RLIKE':
+				throw $this->new_not_supported_exception(
+					'REGEXP (the connection does not support user-defined functions)'
+				);
+		}
+		return null;
+	}
+
+	/**
+	 * Convert a MySQL date format to an SQLite STRFTIME format.
+	 *
+	 * @param  string $format The MySQL date format.
+	 * @return string|null    The STRFTIME format, or null when the format
+	 *                        includes unsupported format specifiers.
+	 */
+	private function convert_mysql_date_format_to_strftime( string $format ): ?string {
+		$map = array(
+			'%Y' => '%Y', // Year, four digits.
+			'%m' => '%m', // Month, two digits.
+			'%c' => '%m', // Month (MySQL: without zero padding).
+			'%d' => '%d', // Day of the month, two digits.
+			'%e' => '%e', // Day of the month, without zero padding.
+			'%H' => '%H', // Hour (00-23).
+			'%k' => '%k', // Hour (0-23).
+			'%h' => '%I', // Hour (01-12).
+			'%I' => '%I', // Hour (01-12).
+			'%l' => '%l', // Hour (1-12).
+			'%i' => '%M', // Minutes, two digits.
+			'%S' => '%S', // Seconds, two digits.
+			'%s' => '%S', // Seconds, two digits.
+			'%p' => '%p', // AM or PM.
+			'%j' => '%j', // Day of the year, three digits.
+			'%w' => '%w', // Day of the week (0 = Sunday).
+			'%T' => '%H:%M:%S',
+			'%%' => '%%',
+		);
+
+		$result = '';
+		$length = strlen( $format );
+		for ( $i = 0; $i < $length; $i++ ) {
+			if ( '%' !== $format[ $i ] ) {
+				$result .= $format[ $i ];
+				continue;
+			}
+			$token = substr( $format, $i, 2 );
+			if ( ! isset( $map[ $token ] ) ) {
+				return null;
+			}
+			$result .= $map[ $token ];
+			$i      += 1;
+		}
+		return $result;
+	}
+
+	/**
+	 * Extract the value of a translated SQLite string literal expression.
+	 *
+	 * @param  string $expression The translated SQLite expression.
+	 * @return string|null        The string value, or null when the
+	 *                            expression is not a plain string literal.
+	 */
+	private function get_string_literal_value( string $expression ): ?string {
+		if ( 1 === preg_match( "/^'((?:[^']|'')*)'$/", $expression, $matches ) ) {
+			return str_replace( "''", "'", $matches[1] );
+		}
+		return null;
+	}
+
+	/**
+	 * Extract the value of a translated SQLite numeric literal expression.
+	 *
+	 * @param  string $expression The translated SQLite expression.
+	 * @return float|null         The numeric value, or null when the
+	 *                            expression is not a plain numeric literal.
+	 */
+	private function get_numeric_literal_value( string $expression ): ?float {
+		if ( 1 === preg_match( '/^-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$/', $expression ) ) {
+			return (float) $expression;
+		}
+		return null;
+	}
+
+	/**
+	 * Evaluate a MySQL LOG() call over constant arguments.
+	 *
+	 * As in MySQL, out-of-domain arguments produce NULL rather than an error:
+	 * a non-positive value, and for the two-argument form, a base that is not
+	 * positive or that equals 1.
+	 *
+	 * @param  float[] $args The constant argument values, as per MySQL LOG().
+	 * @return string        The SQLite literal for the result.
+	 */
+	private function evaluate_logarithm( array $args ): string {
+		if ( 1 === count( $args ) ) {
+			$base  = M_E;
+			$value = $args[0];
+		} else {
+			$base  = $args[0];
+			$value = $args[1];
+		}
+
+		if ( $value <= 0 || $base <= 0 || 1.0 === $base ) {
+			return 'NULL';
+		}
+
+		$result = M_E === $base ? log( $value ) : log( $value ) / log( $base );
+
+		/*
+		 * A locale-independent representation with enough precision to
+		 * round-trip a double, matching how SQLite renders REAL values.
+		 */
+		return rtrim( rtrim( sprintf( '%.17G', $result ), '0' ), '.' );
+	}
+
+	/**
+	 * Compose an SQLite expression that raises an error when evaluated.
+	 *
+	 * This is used for strict mode data validation, where invalid values
+	 * must reject the whole statement at execution time.
+	 *
+	 * With user-defined function support, the "THROW" function raises an
+	 * error with the exact message. Without it, a malformed JSON error is
+	 * raised instead: the message expression is embedded in an invalid
+	 * JSON document passed to JSON_EXTRACT(). Referencing the message
+	 * expression (which involves column values) keeps the expression
+	 * non-constant, so SQLite evaluates it only in the failing branch.
+	 * The exact error message fidelity is lost on such connections.
+	 *
+	 * @param  string $message_expression An SQLite expression composing the error message.
+	 * @return string                     An SQLite expression raising an error when evaluated.
+	 */
+	private function compose_error_expression( string $message_expression ): string {
+		if ( $this->supports_udfs ) {
+			return sprintf( 'THROW(%s)', $message_expression );
+		}
+		return sprintf( "JSON_EXTRACT('[' || (%s), '$')", $message_expression );
 	}
 
 	/**
@@ -5532,17 +6011,25 @@ class WP_MySQL_On_SQLite extends PDO {
 		$pragma_foreign_keys = $this->execute_sqlite_query( 'PRAGMA foreign_keys' )->fetchColumn();
 		$this->execute_sqlite_query( 'PRAGMA foreign_keys = OFF' );
 
-		// 2. Create a new table with the new schema.
 		$tmp_table_name        = self::RESERVED_PREFIX . "tmp_{$table_name}_" . uniqid();
 		$quoted_table_name     = $this->quote_sqlite_identifier( $table_name );
 		$quoted_tmp_table_name = $this->quote_sqlite_identifier( $tmp_table_name );
 		$queries               = $this->get_sqlite_create_table_statement( $table_is_temporary, $table_name, $tmp_table_name );
 		$create_table_query    = $queries[0];
 		$constraint_queries    = array_slice( $queries, 1 );
-		$this->execute_sqlite_query( $create_table_query );
+
+		/*
+		 * Compose steps 2 to 6 as a batch. None of the statements consume
+		 * results of the previous ones, so backends with batch support can
+		 * execute the whole table recreation atomically in a single call.
+		 */
+		$statements = array();
+
+		// 2. Create a new table with the new schema.
+		$statements[] = array( $create_table_query );
 
 		// 3. Copy data from the original table to the new table.
-		$this->execute_sqlite_query(
+		$statements[] = array(
 			sprintf(
 				'INSERT INTO %s (%s) SELECT %s FROM %s',
 				$quoted_tmp_table_name,
@@ -5555,25 +6042,27 @@ class WP_MySQL_On_SQLite extends PDO {
 					array_map( array( $this, 'quote_sqlite_identifier' ), array_keys( $column_map ) )
 				),
 				$quoted_table_name
-			)
+			),
 		);
 
 		// 4. Drop the original table.
-		$this->execute_sqlite_query( sprintf( 'DROP TABLE %s', $quoted_table_name ) );
+		$statements[] = array( sprintf( 'DROP TABLE %s', $quoted_table_name ) );
 
 		// 5. Rename the new table to the original table name.
-		$this->execute_sqlite_query(
+		$statements[] = array(
 			sprintf(
 				'ALTER TABLE %s RENAME TO %s',
 				$quoted_tmp_table_name,
 				$quoted_table_name
-			)
+			),
 		);
 
 		// 6. Reconstruct indexes, triggers, and views.
 		foreach ( $constraint_queries as $query ) {
-			$this->execute_sqlite_query( $query );
+			$statements[] = array( $query );
 		}
+
+		$this->connection->execute_batch( $statements );
 
 		// 7. If foreign key constraints were enabled, verify and enable them.
 		if ( '1' === $pragma_foreign_keys ) {
@@ -6674,7 +7163,7 @@ class WP_MySQL_On_SQLite extends PDO {
 							FROM (SELECT CAST(%s AS INTEGER) AS value)
 						)",
 						$is_strict_mode
-							? sprintf( "THROW('Out of range value: ''' || %s || '''')", $translated_value )
+							? $this->compose_error_expression( sprintf( "'Out of range value: ''' || %s || ''''", $translated_value ) )
 							: "'0000'",
 						$translated_value
 					);
@@ -6683,10 +7172,12 @@ class WP_MySQL_On_SQLite extends PDO {
 				// In strict mode, invalid date/time values are rejected.
 				// In non-strict mode, they get an IMPLICIT DEFAULT value.
 				if ( $is_strict_mode ) {
-					$fallback = sprintf(
-						"THROW('Incorrect %s value: ''' || %s || '''')",
-						$mysql_data_type,
-						$translated_value
+					$fallback = $this->compose_error_expression(
+						sprintf(
+							"'Incorrect %s value: ''' || %s || ''''",
+							$mysql_data_type,
+							$translated_value
+						)
 					);
 				} else {
 					$implicit_default = self::DATA_TYPE_IMPLICIT_DEFAULT_MAP[ $mysql_data_type ] ?? null;
@@ -7650,105 +8141,33 @@ class WP_MySQL_On_SQLite extends PDO {
 		$this->last_column_meta         = array();
 		$this->is_readonly              = false;
 		$this->wrapper_transaction_type = null;
-		$this->user_defined_functions->flush();
+		if ( null !== $this->user_defined_functions ) {
+			$this->user_defined_functions->flush();
+		}
 	}
 
 	/**
-	 * Create a PDO SQLite statement from the specified columns and rows.
+	 * Create a PDO statement from the specified columns and rows.
 	 *
 	 * Some emulated MySQL queries don't have an SQLite counterpart and their
 	 * result data may be generated without a corresponding SQLite statement.
-	 * In such cases, we can generate a simple SQLite SELECT query that will
-	 * provide us with the PDOStatement API for the given column and row data.
+	 * In such cases, we create an in-memory statement that provides us with
+	 * the PDOStatement API for the given column and row data, without any
+	 * interaction with the SQLite database.
 	 *
 	 * @param  array $columns The columns of the result set.
 	 * @param  array $rows    The rows of the result set.
-	 * @return PDOStatement   The corresponding PDO SQLite statement.
+	 * @return PDOStatement   The corresponding PDO statement.
 	 */
 	private function create_result_statement_from_data( array $columns, array $rows ): PDOStatement {
-		$pdo = $this->connection->get_pdo();
-
-		/*
-		 * With 0 columns, we need to create a PDO statement that has no columns.
-		 * This can be done using a noop INSERT statement that modifies no data.
-		 */
-		if ( 0 === count( $columns ) ) {
-			/*
-			 * Build a 0-column statement to represent an empty result set.
-			 *
-			 * A no-op "INSERT ... WHERE FALSE" into a regular table still acquires
-			 * SQLite's write lock, even though it writes nothing. That makes
-			 * no-write statements such as "SET sql_mode = ..." fatal with
-			 * "database is locked" whenever another connection holds the write
-			 * lock. Writing to a connection-private TEMP table uses the temp
-			 * database, which has no shared lock, so it never contends.
-			 */
-			if ( ! $this->empty_result_table_ready ) {
-				$pdo->exec(
-					sprintf(
-						'CREATE TEMP TABLE IF NOT EXISTS %s ( placeholder_for_empty_insert )',
-						$this->quote_sqlite_identifier( self::EMPTY_RESULT_TABLE_NAME )
-					)
-				);
-				$this->empty_result_table_ready = true;
-			}
-			return $pdo->query(
-				sprintf(
-					'INSERT INTO %s ( placeholder_for_empty_insert ) SELECT NULL WHERE FALSE',
-					$this->quote_sqlite_identifier( self::EMPTY_RESULT_TABLE_NAME )
-				)
-			);
-		}
-
-		/*
-		 * Create an SQLite statement that returns the specified columns and rows.
-		 * This can be done using a SELECT statement in the following form:
-		 *
-		 *   -- A dummy header row to assign correct column names.
-		 *   SELECT NULL AS `col1`, NULL AS `col2`, ... WHERE FALSE
-		 *
-		 *   UNION ALL
-		 *
-		 *   -- The actual data rows.
-		 *   VALUES
-		 *     (val11, val12, ...),
-		 *     (val21, val22, ...),
-		 *     ...
-		 */
-
-		// Construct column header row ("SELECT <column-list> WHERE FALSE").
-		$query = 'SELECT ';
-		foreach ( $columns as $i => $column ) {
-			$query .= $i > 0 ? ', ' : '';
-			$query .= 'NULL AS ' . $pdo->quote( $column );
-		}
-		$query .= ' WHERE FALSE';
-
-		// UNION ALL
-		if ( count( $rows ) > 0 ) {
-			$query .= ' UNION ALL VALUES ';
-		}
-
-		// Construct data rows ("VALUES <row-list>").
-		foreach ( $rows as $i => $row ) {
-			$query .= $i > 0 ? ', ' : '';
-			$query .= '(';
-			foreach ( array_values( $row ) as $j => $value ) {
-				$query .= $j > 0 ? ', ' : '';
-				if ( null === $value ) {
-					$query .= 'NULL';
-				} elseif ( is_string( $value ) && strpos( $value, "\0" ) !== false ) {
-					// Handle null characters; see self::translate_string_literal().
-					$query .= sprintf( "CAST(x'%s' AS TEXT)", bin2hex( $value ) );
-				} elseif ( is_string( $value ) ) {
-					$query .= $pdo->quote( $value );
-				} else {
-					$query .= $value;
-				}
-			}
-			$query .= ')';
-		}
-		return $pdo->query( $query );
+		return new WP_PDO_Array_Statement(
+			$columns,
+			$rows,
+			0,
+			(bool) $this->connection->get_attribute( PDO::ATTR_STRINGIFY_FETCHES ),
+			array(),
+			(int) $this->connection->get_attribute( PDO::ATTR_DEFAULT_FETCH_MODE )
+		);
 	}
 
 	/**

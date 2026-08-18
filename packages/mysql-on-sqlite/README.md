@@ -75,9 +75,14 @@ version and configuring the SQLite connection:
 | Option | Description | Default |
 | --- | --- | --- |
 | `mysql_version` | MySQL version to emulate, represented as an integer | `80038` |
+| `sqlite_connection` | Existing `WP_SQLite_Connection_Interface` instance to run queries through. Takes precedence over `sqlite_pdo` and the DSN path | A local PDO connection |
 | `sqlite_pdo` | Existing PDO SQLite connection | A new connection for `path` |
 | `sqlite_journal_mode` | SQLite journal mode | `WAL` |
 | `sqlite_synchronous` | SQLite synchronous setting | `NORMAL` in WAL mode; otherwise the SQLite default |
+
+The `sqlite_connection` option is the extension point used by the Cloudflare D1
+backend to replace the local SQLite database with a remote one. See
+[`src/d1/README.md`](src/d1/README.md).
 
 ## Compatibility
 

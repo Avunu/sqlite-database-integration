@@ -9,13 +9,12 @@
  * SQLite connection.
  *
  * This class configures and encapsulates the connection to an SQLite database.
- * It requires PDO with the SQLite driver, and currently, it is only a simple
- * wrapper that leaks some of the PDO APIs (returns PDOStatement values, etc.).
- * In the future, we may abstract it away from PDO and support SQLite3 as well.
+ * It is the default implementation of the SQLite connection interface, using
+ * PDO with the SQLite driver to access a local SQLite database.
  *
  * @access private
  */
-class WP_SQLite_Connection {
+class WP_SQLite_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * The default timeout in seconds for SQLite to wait for a writable lock.
 	 */
@@ -62,6 +61,29 @@ class WP_SQLite_Connection {
 	 * @var (callable(string, array): void)|null
 	 */
 	private $query_logger = null;
+
+	/**
+	 * Whether fetched values are stringified (PDO::ATTR_STRINGIFY_FETCHES).
+	 *
+	 * The value is tracked here because reading the attribute from PDO is
+	 * not supported on all PHP versions (it requires PHP 8.1 or newer).
+	 *
+	 * @var bool
+	 */
+	private $stringify_fetches = false;
+
+	/**
+	 * Whether a transaction is currently active.
+	 *
+	 * The state is tracked here because on PHP < 8.4, the PDO method
+	 * "PDO::inTransaction()" is not reliable.
+	 *
+	 * @see https://bugs.php.net/bug.php?id=81227
+	 * @see https://github.com/php/php-src/pull/14268
+	 *
+	 * @var bool
+	 */
+	private $in_transaction = false;
 
 	/**
 	 * Constructor.
@@ -198,6 +220,116 @@ class WP_SQLite_Connection {
 	}
 
 	/**
+	 * Execute a batch of queries in SQLite.
+	 *
+	 * The queries are executed sequentially, one at a time. Batches are
+	 * usually executed within a transaction managed by the caller, which
+	 * is what makes the batch execution atomic.
+	 *
+	 * @param  array<int, array{0: string, 1?: array}> $statements
+	 *                       The queries to execute, each being an array of
+	 *                       a query string and optional query parameters.
+	 * @throws PDOException  When the execution of any of the queries fails.
+	 * @return PDOStatement[] The PDO statement objects, one for each query.
+	 */
+	public function execute_batch( array $statements ): array {
+		$results = array();
+		foreach ( $statements as $statement ) {
+			$results[] = $this->query( $statement[0], $statement[1] ?? array() );
+		}
+		return $results;
+	}
+
+	/**
+	 * Begin a transaction.
+	 *
+	 * @param  string $behavior The SQLite transaction behavior.
+	 *                          One of "DEFERRED", "IMMEDIATE", or "EXCLUSIVE".
+	 * @throws PDOException             When the transaction cannot be started.
+	 * @throws InvalidArgumentException When the transaction behavior is invalid.
+	 */
+	public function begin_transaction( string $behavior = 'DEFERRED' ): void {
+		$behavior = strtoupper( $behavior );
+		if ( 'DEFERRED' === $behavior ) {
+			// A plain "BEGIN" is equivalent to "BEGIN DEFERRED".
+			$this->query( 'BEGIN' );
+		} elseif ( 'IMMEDIATE' === $behavior || 'EXCLUSIVE' === $behavior ) {
+			$this->query( 'BEGIN ' . $behavior );
+		} else {
+			throw new InvalidArgumentException(
+				sprintf( 'Invalid SQLite transaction behavior: %s.', $behavior )
+			);
+		}
+		$this->in_transaction = true;
+	}
+
+	/**
+	 * Commit the current transaction.
+	 *
+	 * @throws PDOException When the transaction cannot be committed.
+	 */
+	public function commit(): void {
+		$this->query( 'COMMIT' );
+		$this->in_transaction = false;
+	}
+
+	/**
+	 * Roll back the current transaction.
+	 *
+	 * @throws PDOException When the transaction cannot be rolled back.
+	 */
+	public function rollback(): void {
+		$this->query( 'ROLLBACK' );
+		$this->in_transaction = false;
+	}
+
+	/**
+	 * Create a savepoint.
+	 *
+	 * @param  string $name The savepoint name, unquoted.
+	 * @throws PDOException When the savepoint cannot be created.
+	 */
+	public function savepoint( string $name ): void {
+		$this->query( 'SAVEPOINT ' . $this->quote_identifier( $name ) );
+	}
+
+	/**
+	 * Release a savepoint.
+	 *
+	 * @param  string $name The savepoint name, unquoted.
+	 * @throws PDOException When the savepoint cannot be released.
+	 */
+	public function release_savepoint( string $name ): void {
+		$this->query( 'RELEASE SAVEPOINT ' . $this->quote_identifier( $name ) );
+	}
+
+	/**
+	 * Roll back to a savepoint.
+	 *
+	 * @param  string $name The savepoint name, unquoted.
+	 * @throws PDOException When the rollback fails.
+	 */
+	public function rollback_to_savepoint( string $name ): void {
+		$this->query( 'ROLLBACK TO SAVEPOINT ' . $this->quote_identifier( $name ) );
+	}
+
+	/**
+	 * Check if a transaction is currently active.
+	 *
+	 * The transaction state is tracked only for transactions started using
+	 * the "begin_transaction()" method. Transactions started by executing
+	 * transaction control statements with "query()" are not reflected.
+	 *
+	 * @return bool True when a transaction is active, false otherwise.
+	 */
+	public function in_transaction(): bool {
+		if ( PHP_VERSION_ID >= 80400 ) {
+			return $this->pdo->inTransaction();
+		}
+		return $this->in_transaction;
+	}
+
+	/**
 	 * Prepare a SQLite query for execution.
 	 *
 	 * @param  string $sql  The query to prepare.
@@ -270,6 +402,83 @@ class WP_SQLite_Connection {
 	 */
 	public function quote_identifier( string $unquoted_identifier ): string {
 		return '`' . str_replace( '`', '``', $unquoted_identifier ) . '`';
+	}
+
+	/**
+	 * Get the version of the SQLite engine serving this connection.
+	 *
+	 * @return string The SQLite engine version, e.g. "3.45.1".
+	 */
+	public function get_server_version(): string {
+		return (string) $this->pdo->getAttribute( PDO::ATTR_SERVER_VERSION );
+	}
+
+	/**
+	 * Set a connection attribute.
+	 *
+	 * @param  int   $attribute The attribute to set.
+	 * @param  mixed $value     The value of the attribute.
+	 * @return bool             True on success, false on failure.
+	 */
+	public function set_attribute( int $attribute, $value ): bool {
+		if ( PDO::ATTR_STRINGIFY_FETCHES === $attribute ) {
+			// Track the value locally. Reading it back from PDO is not
+			// supported on all PHP versions (it requires PHP 8.1+).
+			$this->stringify_fetches = (bool) $value;
+		}
+		return $this->pdo->setAttribute( $attribute, $value );
+	}
+
+	/**
+	 * Get a connection attribute.
+	 *
+	 * @param  int   $attribute The attribute to get.
+	 * @return mixed            The value of the attribute.
+	 */
+	public function get_attribute( int $attribute ) {
+		if ( PDO::ATTR_STRINGIFY_FETCHES === $attribute && PHP_VERSION_ID < 80200 ) {
+			// PDO SQLite cannot report this attribute before PHP 8.2. Fall back
+			// to the locally tracked value, which misses the initial state of a
+			// PDO instance that was configured before it was handed to us.
+			return $this->stringify_fetches;
+		}
+		return $this->pdo->getAttribute( $attribute );
+	}
+
+	/**
+	 * Register a user-defined SQL function implemented as a PHP callback.
+	 *
+	 * @param  string   $name     The SQL function name.
+	 * @param  callable $callback The PHP callback implementing the function.
+	 * @return bool               True on success, false on failure.
+	 */
+	public function create_function( string $name, callable $callback ): bool {
+		if ( $this->pdo instanceof PDO\SQLite ) {
+			return $this->pdo->createFunction( $name, $callback );
+		}
+		// phpcs:ignore Generic.PHP.DeprecatedFunctions.Deprecated
+		return $this->pdo->sqliteCreateFunction( $name, $callback );
+	}
+
+	/**
+	 * Check whether the connection supports an optional capability.
+	 *
+	 * A local PDO SQLite connection supports all optional capabilities.
+	 *
+	 * @param  string $capability One of the CAPABILITY_* interface constants.
+	 * @return bool               True when the capability is supported.
+	 */
+	public function has_capability( string $capability ): bool {
+		return in_array(
+			$capability,
+			array(
+				self::CAPABILITY_TRANSACTIONS,
+				self::CAPABILITY_SAVEPOINTS,
+				self::CAPABILITY_TEMPORARY_TABLES,
+				self::CAPABILITY_USER_DEFINED_FUNCTIONS,
+			),
+			true
+		);
 	}
 
 	/**

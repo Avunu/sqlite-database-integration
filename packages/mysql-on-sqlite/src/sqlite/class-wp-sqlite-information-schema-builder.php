@@ -343,7 +343,7 @@ class WP_SQLite_Information_Schema_Builder {
 	/**
 	 * An instance of the SQLite connection.
 	 *
-	 * @var WP_SQLite_Connection
+	 * @var WP_SQLite_Connection_Interface
 	 */
 	private $connection;
 
@@ -351,9 +351,9 @@ class WP_SQLite_Information_Schema_Builder {
 	 * Constructor.
 	 *
 	 * @param string               $reserved_prefix An identifier prefix for internal database objects.
-	 * @param WP_SQLite_Connection $connection      An instance of the SQLite connection.
+	 * @param WP_SQLite_Connection_Interface $connection An instance of the SQLite connection.
 	 */
-	public function __construct( string $reserved_prefix, WP_SQLite_Connection $connection ) {
+	public function __construct( string $reserved_prefix, WP_SQLite_Connection_Interface $connection ) {
 		$this->connection             = $connection;
 		$this->table_prefix           = $reserved_prefix . 'mysql_information_schema_';
 		$this->temporary_table_prefix = $reserved_prefix . 'mysql_information_schema_tmp_';
@@ -378,6 +378,11 @@ class WP_SQLite_Information_Schema_Builder {
 	 * @return bool               True if the temporary table exists, false otherwise.
 	 */
 	public function temporary_table_exists( string $table_name ): bool {
+		// Temporary tables can't exist on connections that don't support them.
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TEMPORARY_TABLES ) ) {
+			return false;
+		}
+
 		/*
 		 * We could search in the "{$this->temporary_table_prefix}tables" table,
 		 * but it may not exist yet, so using "sqlite_temp_master" is simpler.
@@ -394,7 +399,7 @@ class WP_SQLite_Information_Schema_Builder {
 	 * database. Tables that are missing will be created.
 	 */
 	public function ensure_information_schema_tables(): void {
-		$sqlite_version         = $this->connection->get_pdo()->getAttribute( PDO::ATTR_SERVER_VERSION ); // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO
+		$sqlite_version         = $this->connection->get_server_version();
 		$supports_strict_tables = version_compare( $sqlite_version, '3.37.0', '>=' );
 		foreach ( self::INFORMATION_SCHEMA_TABLE_DEFINITIONS as $table_name => $table_body ) {
 			$this->connection->query(
@@ -462,7 +467,11 @@ class WP_SQLite_Information_Schema_Builder {
 	 * the SQLite database. Tables that are missing will be created.
 	 */
 	public function ensure_temporary_information_schema_tables(): void {
-		$sqlite_version         = $this->connection->get_pdo()->getAttribute( PDO::ATTR_SERVER_VERSION ); // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TEMPORARY_TABLES ) ) {
+			return;
+		}
+
+		$sqlite_version         = $this->connection->get_server_version();
 		$supports_strict_tables = version_compare( $sqlite_version, '3.37.0', '>=' );
 		foreach ( self::INFORMATION_SCHEMA_TABLE_DEFINITIONS as $table_name => $table_body ) {
 			// Skip the "schemata" table; MySQL doesn't support temporary databases.

@@ -1,0 +1,21 @@
+{
+	"name": "@wp-sqlite/d1-proxy-worker",
+	"version": "0.1.0",
+	"description": "A Cloudflare Worker handler exposing a D1 database over a small HTTP protocol, for use as a database backend of the SQLite database integration driver.",
+	"license": "GPL-2.0-or-later",
+	"type": "module",
+	"main": "src/handler.js",
+	"exports": {
+		".": "./src/handler.js",
+		"./worker": "./src/worker.js"
+	},
+	"scripts": {
+		"dev": "wrangler dev",
+		"test": "vitest run"
+	},
+	"devDependencies": {
+		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"vitest": "~3.0.9",
+		"wrangler": "^4.20.0"
+	}
+}
