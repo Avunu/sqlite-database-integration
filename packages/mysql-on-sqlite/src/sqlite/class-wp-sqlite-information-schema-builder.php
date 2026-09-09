@@ -1954,29 +1954,52 @@ class WP_SQLite_Information_Schema_Builder {
 		// @TODO: Consider listing only affected columns.
 		$columns_table_name    = $this->get_table_name( $table_is_temporary, 'columns' );
 		$statistics_table_name = $this->get_table_name( $table_is_temporary, 'statistics' );
-		$this->connection->query(
-			'
-				UPDATE ' . $this->connection->quote_identifier( $columns_table_name ) . " AS c
-				SET (column_key, is_nullable) = (
-					SELECT
-						CASE
-							WHEN MAX(s.index_name = 'PRIMARY') THEN 'PRI'
-							WHEN MAX(s.non_unique = 0 AND s.seq_in_index = 1) THEN 'UNI'
-							WHEN MAX(s.seq_in_index = 1) THEN 'MUL'
-							ELSE ''
-						END,
-						CASE
-							WHEN MAX(s.index_name = 'PRIMARY') THEN 'NO'
-							ELSE c.is_nullable
-						END
-					FROM " . $this->connection->quote_identifier( $statistics_table_name ) . ' AS s
+		/*
+		 * Assign the two columns separately rather than as a row value, and guard
+		 * each subquery with COALESCE().
+		 *
+		 * An aggregate subquery with no GROUP BY always yields exactly one row, so
+		 * on SQLite the COALESCE() calls never fire and the row-value form would be
+		 * equivalent. Turso, however, can yield no row at all from the row-value
+		 * correlated subquery when the row being updated sorts before a row that
+		 * does have a matching statistics entry, which sets both columns to NULL
+		 * and trips the NOT NULL constraint on IS_NULLABLE.
+		 *
+		 * The fallbacks are the values the ELSE branches would have produced for a
+		 * column with no index entries, so behavior is unchanged on either engine.
+		 */
+		$columns_table    = $this->connection->quote_identifier( $columns_table_name );
+		$statistics_table = $this->connection->quote_identifier( $statistics_table_name );
+		$correlation      = "FROM $statistics_table AS s
 					WHERE s.table_schema = c.table_schema
 					AND s.table_name = c.table_name
-					AND s.column_name = c.column_name
-				)
+					AND s.column_name = c.column_name";
+
+		$this->connection->query(
+			"
+				UPDATE $columns_table AS c
+				SET
+					column_key = COALESCE((
+						SELECT
+							CASE
+								WHEN MAX(s.index_name = 'PRIMARY') THEN 'PRI'
+								WHEN MAX(s.non_unique = 0 AND s.seq_in_index = 1) THEN 'UNI'
+								WHEN MAX(s.seq_in_index = 1) THEN 'MUL'
+								ELSE ''
+							END
+						$correlation
+					), ''),
+					is_nullable = COALESCE((
+						SELECT
+							CASE
+								WHEN MAX(s.index_name = 'PRIMARY') THEN 'NO'
+								ELSE c.is_nullable
+							END
+						$correlation
+					), c.is_nullable)
 			    WHERE c.table_schema = ?
 			    AND c.table_name = ?
-			',
+			",
 			array( self::SAVED_DATABASE_NAME, $table_name )
 		);
 	}
