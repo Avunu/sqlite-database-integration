@@ -16,6 +16,8 @@ class WP_MySQL_On_SQLite_Tests extends TestCase {
 	private const SQL_MODE_TIME_TRUNCATE_FRACTIONAL = 1 << 32;
 	private const UNKNOWN_SQL_MODE_BIT              = 1 << 33;
 
+	private const SAVEPOINT_DOES_NOT_EXIST_ERROR = 'SQLSTATE[42000]: Syntax error or access violation: 1305 SAVEPOINT %s does not exist';
+
 	/** @var WP_MySQL_On_SQLite */
 	private $engine;
 
@@ -4866,6 +4868,63 @@ QUERY
 		$this->assertCount( 2, $result ); // Should match both 'first' and 'FIRST'
 	}
 
+	/**
+	 * @dataProvider dataLikePatterns
+	 */
+	public function testLikePatternPreservesBytes( $pattern, $expected ): void {
+		$functions = new WP_SQLite_PDO_User_Defined_Functions();
+
+		$this->assertSame( $expected, $functions->_helper_like_to_glob_pattern( $pattern ) );
+	}
+
+	public function dataLikePatterns(): array {
+		return array(
+			'null'                 => array( null, null ),
+			'empty'                => array( '', '' ),
+			'raw bytes'            => array( "\xff\xfe\x80", "\xff\xfe\x80" ),
+			'escaped byte'         => array( "\\\xff", "\xff" ),
+			'truncated UTF-8'      => array( "\xe2\x82", "\xe2\x82" ),
+			'overlong UTF-8'       => array( "\xc0\xaf", "\xc0\xaf" ),
+			'surrogate'            => array( "\xed\xa0\x80", "\xed\xa0\x80" ),
+			'escaped newline'      => array( "\\\n", "\n" ),
+			'escaped CRLF'         => array( "\\\r\\\n", "\r\n" ),
+			'escaped null byte'    => array( "\\\0", "\0" ),
+			'escaped Unicode'      => array( '\\©\\🙂', '©🙂' ),
+			'wildcards with bytes' => array( "\xff%_\xfe", "\xff*?\xfe" ),
+			'escaped wildcards'    => array( "\xff\\%\\_", "\xff%_" ),
+			'escaped backslash'    => array( "\xff\\\\", "\xff\\" ),
+			'GLOB metacharacters'  => array( "\xff*?]", "\xff[*][?][]]" ),
+		);
+	}
+
+	/**
+	 * @dataProvider dataLikeBinaryPatterns
+	 */
+	public function testLikeBinaryPreservesPatternBytes( $value, $pattern, $expected ): void {
+		$query = sprintf(
+			'SELECT %s LIKE BINARY %s',
+			null === $value ? 'NULL' : $this->engine->quote( $value ),
+			null === $pattern ? 'NULL' : $this->engine->quote( $pattern )
+		);
+
+		$this->assertSame( $expected, $this->engine->query( $query )->fetchColumn() );
+	}
+
+	public function dataLikeBinaryPatterns(): array {
+		return array(
+			'raw byte'          => array( "\xff", "\xff", '1' ),
+			'escaped byte'      => array( "\xff", "\\\xff", '1' ),
+			'nonmatching text'  => array( "\xffa", "\xffb", '0' ),
+			'percent wildcard'  => array( "\xfftail", "\xff%", '1' ),
+			'underscore'        => array( "\xffx", "\xff_", '1' ),
+			'escaped wildcards' => array( "\xff%_", "\xff\\%\\_", '1' ),
+			'escaped newline'   => array( "\n", "\\\n", '1' ),
+			'escaped Unicode'   => array( '©🙂', '\\©\\🙂', '1' ),
+			'null pattern'      => array( 'x', null, null ),
+			'null value'        => array( null, 'x', null ),
+		);
+	}
+
 	public function testUniqueConstraints() {
 		$this->assertQuery(
 			"CREATE TABLE _tmp_table (
@@ -7724,6 +7783,125 @@ END;
 		$this->assertSame( array(), (array) array_column( $result, 'id' ) );
 	}
 
+	public function testSavepointWithoutTransactionDoesNotStartTransaction(): void {
+		$this->assertQuery( 'CREATE TABLE t (id INT PRIMARY KEY, v INT)' );
+		$this->assertQuery( 'INSERT INTO t (id, v) VALUES (1, 1)' );
+
+		// With autocommit, each statement forms its own transaction, so a savepoint
+		// is discarded as soon as the SAVEPOINT statement completes.
+		$this->assertQuery( 'SAVEPOINT sp1' );
+		$this->assertFalse( $this->engine->inTransaction() );
+
+		// The write must succeed and be committed immediately.
+		$this->assertQuery( 'UPDATE t SET v = 2 WHERE id = 1' );
+		$this->assertFalse( $this->engine->inTransaction() );
+		$result = $this->assertQuery( 'SELECT v FROM t WHERE id = 1' );
+		$this->assertSame( '2', $result[0]->v );
+
+		// The savepoint is no longer available.
+		$this->assertQueryError(
+			'ROLLBACK TO SAVEPOINT sp1',
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'sp1' )
+		);
+	}
+
+	public function testReleaseSavepointWithoutTransaction(): void {
+		$this->assertQuery( 'SAVEPOINT sp1' );
+		$this->assertQueryError(
+			'RELEASE SAVEPOINT sp1',
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'sp1' )
+		);
+	}
+
+	/**
+	 * @dataProvider missingSavepointStatements
+	 */
+	public function testMissingSavepointDoesNotRollbackTransaction( string $statement ): void {
+		$this->assertQuery( 'CREATE TABLE t (id INT)' );
+		$this->assertQuery( 'BEGIN' );
+		$this->assertQuery( 'SAVEPOINT existing' );
+		$this->assertQuery( 'INSERT INTO t VALUES (1)' );
+
+		$this->assertQueryError(
+			$statement,
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'missing' )
+		);
+
+		$this->assertTrue( $this->engine->inTransaction() );
+		$this->assertSame( '1', $this->assertQuery( 'SELECT id FROM t' )[0]->id );
+
+		$this->assertQuery( 'ROLLBACK TO SAVEPOINT existing' );
+		$this->assertQuery( 'RELEASE SAVEPOINT existing' );
+		$this->assertQuery( 'COMMIT' );
+		$this->assertSame( array(), $this->assertQuery( 'SELECT id FROM t' ) );
+	}
+
+	public static function missingSavepointStatements(): array {
+		return array(
+			'ROLLBACK TO SAVEPOINT' => array( 'ROLLBACK TO SAVEPOINT missing' ),
+			'RELEASE SAVEPOINT'     => array( 'RELEASE SAVEPOINT missing' ),
+		);
+	}
+
+	public function testDuplicateSavepointNameReplacesOldSavepoint(): void {
+		$this->assertQuery( 'BEGIN' );
+		$this->assertQuery( 'SAVEPOINT sp1' );
+		$this->assertQuery( 'SAVEPOINT sp2' );
+		$this->assertQuery( 'SAVEPOINT sp1' );
+
+		// Releasing the replacement must leave sp2 available.
+		$this->assertQuery( 'RELEASE SAVEPOINT sp1' );
+		$this->assertQuery( 'ROLLBACK TO SAVEPOINT sp2' );
+
+		// The original sp1 must remain unavailable.
+		$this->assertQueryError(
+			'ROLLBACK TO SAVEPOINT sp1',
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'sp1' )
+		);
+	}
+
+	public function testReleaseSavepointDeletesNestedSavepoints(): void {
+		$this->assertQuery( 'BEGIN' );
+		$this->assertQuery( 'SAVEPOINT sp1' );
+		$this->assertQuery( 'SAVEPOINT sp2' );
+		$this->assertQuery( 'RELEASE SAVEPOINT sp1' );
+		$this->assertQueryError(
+			'ROLLBACK TO SAVEPOINT sp2',
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'sp2' )
+		);
+	}
+
+	public function testRollbackToSavepointDeletesNestedSavepoints(): void {
+		$this->assertQuery( 'BEGIN' );
+		$this->assertQuery( 'SAVEPOINT sp1' );
+		$this->assertQuery( 'SAVEPOINT sp2' );
+		$this->assertQuery( 'ROLLBACK TO SAVEPOINT sp1' );
+		$this->assertQueryError(
+			'ROLLBACK TO SAVEPOINT sp2',
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'sp2' )
+		);
+	}
+
+	public function testCommitDeletesSavepoints(): void {
+		$this->assertQuery( 'BEGIN' );
+		$this->assertQuery( 'SAVEPOINT sp1' );
+		$this->assertQuery( 'COMMIT' );
+		$this->assertQueryError(
+			'ROLLBACK TO SAVEPOINT sp1',
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'sp1' )
+		);
+	}
+
+	public function testRollbackDeletesSavepoints(): void {
+		$this->assertQuery( 'BEGIN' );
+		$this->assertQuery( 'SAVEPOINT sp1' );
+		$this->assertQuery( 'ROLLBACK' );
+		$this->assertQueryError(
+			'ROLLBACK TO SAVEPOINT sp1',
+			sprintf( self::SAVEPOINT_DOES_NOT_EXIST_ERROR, 'sp1' )
+		);
+	}
+
 	public function testRowLeveLockingClauses() {
 		$this->assertQuery( 'CREATE TABLE t (name VARCHAR(255), value VARCHAR(255))' );
 		$this->query( "INSERT INTO t (name, value) VALUES ('test_lock', '123')" );
@@ -8004,7 +8182,7 @@ END;
 
 	public function testRollbackNonExistentTransactionSavepoint(): void {
 		$this->expectException( 'WP_MySQL_On_SQLite_Exception' );
-		$this->expectExceptionMessage( 'no such savepoint: sp1' );
+		$this->expectExceptionMessage( 'SAVEPOINT sp1 does not exist' );
 		$this->assertQuery( 'ROLLBACK TO SAVEPOINT sp1' );
 	}
 
@@ -11540,7 +11718,8 @@ END;
 		$this->assertSame( 0, $this->last_statement->columnCount() );
 		$this->assertSame( array(), $this->getLastColumnMeta() );
 
-		// SAVEPOINT
+		// SAVEPOINT (savepoints exist only within a transaction).
+		$this->assertQuery( 'START TRANSACTION' );
 		$this->assertQuery( 'SAVEPOINT s1' );
 		$this->assertSame( 0, $this->last_statement->columnCount() );
 		$this->assertSame( array(), $this->getLastColumnMeta() );
@@ -11554,6 +11733,7 @@ END;
 		$this->assertQuery( 'RELEASE SAVEPOINT s1' );
 		$this->assertSame( 0, $this->last_statement->columnCount() );
 		$this->assertSame( array(), $this->getLastColumnMeta() );
+		$this->assertQuery( 'COMMIT' );
 
 		// LOCK TABLE
 		$this->assertQuery( 'LOCK TABLES t READ' );
