@@ -1,0 +1,181 @@
+<?php
+/**
+ * Plugin Name: Turso integration (Drop-in)
+ * Version: 1.0.0
+ *
+ * A "wp-content/db.php" drop-in connecting WordPress to a Turso database
+ * through the MySQL-on-SQLite driver.
+ *
+ * Two shapes, chosen by whether a snapshot is configured.
+ *
+ *   Without WP_TURSO_SNAPSHOT, every statement goes to the primary over
+ *   "SQL over HTTP". This is the control plane: wp-admin, cron and the
+ *   deployment tooling, which must read their own writes immediately. Put the
+ *   primary on the same host -- at ~156 us per statement a query-heavy admin
+ *   page lands around 31 ms, where a round trip over the WAN would not.
+ *
+ *   With WP_TURSO_SNAPSHOT, reads come from that local SQLite file and writes
+ *   go to the primary, and the first write latches the rest of the request to
+ *   the primary so it reads its own writes. This is the public front end: a
+ *   page render never touches the network.
+ *
+ * The snapshot is published by a separate process, not by this drop-in. A live
+ * Turso embedded replica cannot be read by pdo_sqlite at all -- Turso holds an
+ * exclusive lock on it and coordinates its WAL through a file SQLite does not
+ * know about -- so the publisher keeps a private replica and periodically hands
+ * over a consistent standalone copy (sync, VACUUM INTO, rename). The front end
+ * is therefore stale by at most one publish interval.
+ *
+ * Configuration (as wp-config.php constants or environment variables):
+ *
+ *   WP_TURSO_URL                  Required. The database URL. "libsql://" and
+ *                                 "turso://" are accepted and mean HTTPS.
+ *   WP_TURSO_TOKEN                The bearer token, if the server needs one.
+ *   WP_TURSO_SNAPSHOT             Path to a published snapshot to read from.
+ *                                 Omit for an all-primary connection.
+ *   WP_TURSO_SNAPSHOT_JOURNAL     The snapshot's journal mode. Default "DELETE",
+ *                                 matching what the publisher writes.
+ *   WP_TURSO_SCHEMA_CACHE         Whether to cache schema information reads
+ *                                 within a request. Default: true.
+ *   WP_TURSO_HTTP_TIMEOUT_MS      The HTTP request timeout. Default: 30000.
+ *   WP_TURSO_PIPELINE_PATH        The pipeline endpoint. Default "/v2/pipeline".
+ *   WP_TURSO_TRANSACTION_FALLBACK How to handle transactional statements, which
+ *                                 Turso cannot carry over HTTP: "warn"
+ *                                 (default), "error", or "ignore".
+ *
+ * @package wp-sqlite-integration
+ */
+
+define( 'TURSO_DB_DROPIN_VERSION', '1.0.0' );
+
+// Tweak to allow copy-pasting the file without having to run string-replacements.
+$sqlite_plugin_implementation_folder_path = '{SQLITE_IMPLEMENTATION_FOLDER_PATH}';
+if ( ! file_exists( $sqlite_plugin_implementation_folder_path ) ) { // Check that the folder exists.
+	$sqlite_plugin_implementation_folder_path = realpath( __DIR__ . '/plugins/sqlite-database-integration' );
+}
+
+// Bail early if the SQLite implementation was not located in the plugin.
+if ( ! $sqlite_plugin_implementation_folder_path || ! file_exists( $sqlite_plugin_implementation_folder_path . '/wp-includes/database/turso/load.php' ) ) {
+	return;
+}
+
+/**
+ * Read a configuration value from a constant or an environment variable.
+ *
+ * @param  string $name    The constant and environment variable name.
+ * @param  mixed  $default The default value.
+ * @return mixed           The configuration value.
+ */
+function wp_sqlite_turso_config( string $name, $default = null ) {
+	if ( defined( $name ) ) {
+		return constant( $name );
+	}
+	$value = getenv( $name );
+	if ( false !== $value && '' !== $value ) {
+		return $value;
+	}
+	return $default;
+}
+
+// Bail early if the database URL is not configured. WordPress then falls back
+// to the default MySQL database connection.
+if ( ! wp_sqlite_turso_config( 'WP_TURSO_URL' ) ) {
+	return;
+}
+
+// Define the database engine constants.
+if ( ! defined( 'DATABASE_TYPE' ) ) {
+	define( 'DATABASE_TYPE', 'turso' );
+}
+if ( ! defined( 'DB_ENGINE' ) ) {
+	define( 'DB_ENGINE', 'turso' );
+}
+
+/*
+ * Require the driver and the Turso backend from the plugin.
+ *
+ * The plugin's "install-functions.php" is intentionally NOT loaded: its
+ * installer creates WordPress tables over a separate local SQLite connection.
+ * Here the installer has to run through $wpdb (the core "wp_install()" and
+ * "dbDelta()" path), so the schema is created on the primary.
+ */
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/version.php';
+require_once $sqlite_plugin_implementation_folder_path . '/constants.php';
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/load.php';
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/database/turso/load.php';
+require_once $sqlite_plugin_implementation_folder_path . '/wp-includes/sqlite/class-wp-sqlite-db.php';
+
+/**
+ * A WordPress database access class connecting to Turso.
+ *
+ * This replaces the local SQLite connection of WP_SQLite_DB with a Turso one;
+ * everything else about the MySQL-on-SQLite driver applies unchanged.
+ */
+class WP_Turso_DB extends WP_SQLite_DB {
+	/**
+	 * Connect to the Turso database.
+	 *
+	 * @see WP_SQLite_DB::db_connect()
+	 *
+	 * @param  bool $allow_bail Not used.
+	 * @return void
+	 */
+	public function db_connect( $allow_bail = true ) {
+		if ( $this->dbh ) {
+			return;
+		}
+		$this->init_charset();
+
+		if ( null === $this->dbname || '' === $this->dbname ) {
+			$this->bail(
+				'The database name was not set. The SQLite driver requires a database name to be set to emulate MySQL information schema tables.',
+				'db_connect_fail'
+			);
+			return false;
+		}
+
+		try {
+			$snapshot = wp_sqlite_turso_config( 'WP_TURSO_SNAPSHOT' );
+			if ( $snapshot && ! is_readable( (string) $snapshot ) ) {
+				/*
+				 * A configured snapshot that is not there yet means the
+				 * publisher has not run. Serving from the primary is slower but
+				 * correct, which is the right way to fail.
+				 */
+				$snapshot = null;
+			}
+
+			$connection = wp_sqlite_turso_create_connection(
+				(string) wp_sqlite_turso_config( 'WP_TURSO_URL' ),
+				wp_sqlite_turso_config( 'WP_TURSO_TOKEN' ),
+				null !== $snapshot ? (string) $snapshot : null,
+				array(
+					'timeout_ms'            => (int) wp_sqlite_turso_config( 'WP_TURSO_HTTP_TIMEOUT_MS', 30000 ),
+					'pipeline_path'         => (string) wp_sqlite_turso_config( 'WP_TURSO_PIPELINE_PATH', '/v2/pipeline' ),
+					'schema_cache'          => filter_var( wp_sqlite_turso_config( 'WP_TURSO_SCHEMA_CACHE', true ), FILTER_VALIDATE_BOOLEAN ),
+					'snapshot_journal_mode' => (string) wp_sqlite_turso_config( 'WP_TURSO_SNAPSHOT_JOURNAL', 'DELETE' ),
+				)
+			);
+
+			$this->dbh = new WP_MySQL_On_SQLite(
+				sprintf( 'mysql-on-sqlite:dbname=%s', str_replace( ';', ';;', $this->dbname ) ),
+				null,
+				null,
+				array(
+					'sqlite_connection'    => $connection,
+					'transaction_fallback' => (string) wp_sqlite_turso_config( 'WP_TURSO_TRANSACTION_FALLBACK', 'warn' ),
+				)
+			);
+			$this->dbh->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
+		} catch ( Throwable $e ) {
+			$this->last_error = 'Failed to connect to the Turso database: ' . $e->getMessage();
+		}
+		if ( $this->last_error ) {
+			return false;
+		}
+		$this->ready = true;
+		$this->set_sql_mode();
+	}
+}
+
+$GLOBALS['wpdb'] = new WP_Turso_DB( defined( 'DB_NAME' ) ? DB_NAME : '' );

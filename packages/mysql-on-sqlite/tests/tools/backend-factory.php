@@ -10,6 +10,10 @@
  *   - "d1": the Cloudflare D1 connection over a fake transport enforcing
  *     D1 semantics (no transactions, no temporary tables, no user-defined
  *     functions, JSON value coercion) against a local SQLite database.
+ *   - "turso": the Turso connection over a fake transport enforcing Turso's
+ *     "SQL over HTTP" semantics against a local SQLite database. The optional
+ *     capabilities it withholds are the same ones D1 withholds, for different
+ *     reasons -- see WP_SQLite_Turso_Fake_Transport.
  *
  * phpcs:disable WordPress.DB.RestrictedClasses.mysql__PDO
  */
@@ -19,10 +23,15 @@ if ( 'd1' === getenv( 'WP_SQLITE_TEST_BACKEND' ) ) {
 	require_once __DIR__ . '/class-wp-sqlite-d1-fake-transport.php';
 }
 
+if ( 'turso' === getenv( 'WP_SQLITE_TEST_BACKEND' ) ) {
+	require_once __DIR__ . '/../../src/turso/load.php';
+	require_once __DIR__ . '/class-wp-sqlite-turso-fake-transport.php';
+}
+
 /**
  * Get the connection backend to run driver tests against.
  *
- * @return string The backend name: "pdo" or "d1".
+ * @return string The backend name: "pdo", "d1", or "turso".
  */
 function wp_sqlite_tests_backend(): string {
 	$backend = getenv( 'WP_SQLITE_TEST_BACKEND' );
@@ -49,6 +58,13 @@ function wp_sqlite_tests_create_engine( ?PDO &$sqlite = null, string $db_name = 
 
 		// Transactional statements are ignored: PHPUnit converts the
 		// "warn" fallback warnings to test errors.
+		return new WP_SQLite_Driver( $connection, $db_name, 80038, array( 'transaction_fallback' => 'ignore' ) );
+	}
+
+	if ( 'turso' === wp_sqlite_tests_backend() ) {
+		$sqlite->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
+		$connection = new WP_SQLite_Turso_Connection( new WP_SQLite_Turso_Fake_Transport( $sqlite ) );
+
 		return new WP_SQLite_Driver( $connection, $db_name, 80038, array( 'transaction_fallback' => 'ignore' ) );
 	}
 
@@ -84,6 +100,19 @@ function wp_sqlite_tests_create_pdo_engine( string $dsn, ?PDO &$sqlite = null ):
 			)
 		);
 	}
+
+	if ( 'turso' === wp_sqlite_tests_backend() ) {
+		$sqlite->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
+		return new WP_MySQL_On_SQLite(
+			$dsn,
+			null,
+			null,
+			array(
+				'sqlite_connection'    => new WP_SQLite_Turso_Connection( new WP_SQLite_Turso_Fake_Transport( $sqlite ) ),
+				'transaction_fallback' => 'ignore',
+			)
+		);
+	}
 	return new WP_MySQL_On_SQLite( $dsn, null, null, array( 'sqlite_pdo' => $sqlite ) );
 }
 
@@ -94,21 +123,29 @@ function wp_sqlite_tests_create_pdo_engine( string $dsn, ?PDO &$sqlite = null ):
  * @param PHPUnit\Framework\TestCase $test The current test instance.
  */
 function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): void {
-	if ( 'd1' !== wp_sqlite_tests_backend() ) {
+	$backend = wp_sqlite_tests_backend();
+	if ( 'd1' !== $backend && 'turso' !== $backend ) {
 		return;
 	}
 
+	$name = 'd1' === $backend ? 'D1' : 'Turso';
+
 	$reasons = array(
-		'transactions'     => 'D1 does not support interactive transactions.',
-		'temporary tables' => 'D1 does not support temporary tables.',
-		'REGEXP'           => 'D1 does not support the REGEXP operator (no user-defined functions).',
-		'seeded RAND'      => 'D1 does not support seeded RAND(N) (no user-defined functions).',
+		'transactions'     => $name . ' does not support interactive transactions.',
+		'temporary tables' => $name . ' does not support temporary tables.',
+		'REGEXP'           => $name . ' does not support the REGEXP operator (no user-defined functions).',
+		'seeded RAND'      => $name . ' does not support seeded RAND(N) (no user-defined functions).',
 		'strict messages'  => 'Strict mode error messages differ without user-defined functions.',
 		'PHP evaluation'   => 'The function requires constant arguments without user-defined functions.',
-		'column metadata'  => 'Detailed column metadata is not carried by the D1 protocol.',
+		'column metadata'  => 'Detailed column metadata is not carried by the ' . $name . ' protocol.',
 		'native types'     => 'The fake transport cannot carry native value types before PHP 8.1.',
 	);
 
+	/*
+	 * Both remote backends withhold the same four optional capabilities, so the
+	 * set of tests they cannot run is the same -- for different reasons, which
+	 * the connection classes document.
+	 */
 	$skip_list = wp_sqlite_tests_d1_skip_list();
 	$test_name = get_class( $test ) . '::' . $test->getName( false );
 	if ( isset( $skip_list[ $test_name ] ) ) {
