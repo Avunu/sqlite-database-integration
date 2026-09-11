@@ -428,13 +428,6 @@ class WP_PDO_Array_Statement_Tests extends TestCase {
 	}
 
 	public function test_iteration_yields_the_remaining_rows(): void {
-		if ( PHP_VERSION_ID < 80000 ) {
-			$this->markTestSkipped(
-				'Before PHP 8.0, PDOStatement iterates through an internal handler that'
-				. ' a subclass cannot override; getIterator() only takes effect from 8.0.'
-			);
-		}
-
 		$stmt = $this->create_array_statement();
 		$stmt->setFetchMode( PDO::FETCH_NUM );
 

@@ -3,7 +3,7 @@
 Contributors:      wordpressdotorg, aristath, janjakes, zieladam, berislav.grgicak, bpayton, zaerl
 Requires at least: 6.4
 Tested up to:      7.1
-Requires PHP:      7.2
+Requires PHP:      8.0
 Stable tag:        3.0.1
 License:           GPLv2 or later
 License URI:       https://www.gnu.org/licenses/gpl-2.0.html

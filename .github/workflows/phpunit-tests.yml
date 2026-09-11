@@ -42,10 +42,8 @@ jobs:
       matrix:
         include:
           # Pure-PHP parser, across the supported PHP versions, each pinned to a
-          # representative SQLite version spanning the supported range.
-          - { php: '7.2', sqlite: '3.27.0', extension: false } # minimum with WP_SQLITE_UNSAFE_ENABLE_UNSUPPORTED_VERSIONS
-          - { php: '7.3', sqlite: '3.31.1', extension: false } # Ubuntu 20.04 LTS
-          - { php: '7.4', sqlite: '3.34.1', extension: false } # Debian 11 (Bullseye)
+          # representative SQLite version spanning the supported range. PHP 8.0
+          # is the floor: this fork does not carry the 7.x series.
           - { php: '8.0', sqlite: '3.37.0', extension: false } # minimum supported version (STRICT tables)
           - { php: '8.1', sqlite: '3.40.1', extension: false } # Debian 12 (Bookworm)
           - { php: '8.2', sqlite: '3.45.1', extension: false } # Ubuntu 24.04 LTS

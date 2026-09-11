@@ -3,7 +3,7 @@
 A fast and complete **MySQL parser** in pure PHP with zero dependencies, generated
 directly from the **official MySQL grammar**.
 
-The runtime requires **PHP 7.2+** with no extensions.
+The runtime requires **PHP 8.0+** with no extensions.
 
 ## How it works
 
