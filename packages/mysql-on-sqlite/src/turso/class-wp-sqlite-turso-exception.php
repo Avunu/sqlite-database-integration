@@ -31,8 +31,17 @@ class WP_SQLite_Turso_Exception extends PDOException {
 	 * @return self
 	 */
 	public static function from_server_error( ?string $error_code, string $message, ?int $http_status = null ): self {
-		// Strip the Turso stage prefix from the SQLite error message.
-		$message = preg_replace( '/^(?:Parse|Transaction|Runtime|Prepare) error: /', '', $message );
+		/*
+		 * Strip Turso's decorations down to the SQLite message. The CLI sync
+		 * server sends "<stage> error: <message>"; Turso Cloud wraps that again
+		 * as "Tursodb error: <stage> error: <message>". The driver matches on
+		 * the bare message to give errors their MySQL identity.
+		 */
+		$message = preg_replace(
+			'/^(?:Tursodb error: )?(?:(?:Parse|Transaction|Runtime|Prepare|Execute) error: )?/',
+			'',
+			$message
+		);
 
 		if ( 1 === preg_match( '/\bconstraint failed\b/i', $message ) ) {
 			// SQLite error code 19: SQLITE_CONSTRAINT.

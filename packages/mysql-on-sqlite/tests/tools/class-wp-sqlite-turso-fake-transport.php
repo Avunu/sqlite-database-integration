@@ -119,6 +119,20 @@ class WP_SQLite_Turso_Fake_Transport implements WP_SQLite_Turso_Transport_Interf
 	}
 
 	/**
+	 * See the transport interface.
+	 *
+	 * The fake's PDO session persists, so applying the statements once has the
+	 * same effect as sending them ahead of every request.
+	 *
+	 * @param string[] $statements SQL statements, run in order.
+	 */
+	public function set_session_statements( array $statements ): void {
+		foreach ( $statements as $sql ) {
+			$this->pdo->exec( $sql );
+		}
+	}
+
+	/**
 	 * Reject statements Turso cannot carry over HTTP.
 	 *
 	 * @param  string $sql The SQL statement.

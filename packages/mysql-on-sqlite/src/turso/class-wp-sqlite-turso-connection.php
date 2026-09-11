@@ -28,10 +28,12 @@
  *     anywhere fails with "cannot start a transaction within a transaction".
  *     Transactions are therefore reported as unsupported and atomicity comes
  *     from execute_batch().
- *   - PRAGMA statements do work, including "foreign_keys", and they persist
- *     across requests -- they are connection state on a connection the server
- *     shares between clients. The driver's own use of them is safe because it
- *     sets them deliberately; be aware that two clients share the setting.
+ *   - PRAGMA statements work, but whether they persist depends on the server.
+ *     The CLI sync server shares one connection between every client, so a
+ *     pragma persists (and is shared); Turso Cloud gives each request its own
+ *     session, so it does not. "foreign_keys" is the one the driver relies on,
+ *     so the connection tracks it and has the transport send it ahead of every
+ *     request. Other pragmas pass through and last for the request.
  *   - Bound parameters are not capped the way D1's are: 1000 in one statement
  *     is fine. Inlining stays as a safety valve, at a much higher threshold.
  */
@@ -101,6 +103,19 @@ class WP_SQLite_Turso_Connection implements WP_SQLite_Connection_Interface {
 	 * @var int
 	 */
 	private $last_insert_id = 0;
+
+	/**
+	 * The desired value of "PRAGMA foreign_keys".
+	 *
+	 * Turso Cloud gives each HTTP request its own session, so the pragma the
+	 * driver sets once at connect time would be gone by its next statement.
+	 * The connection keeps the setting here instead and has the transport send
+	 * it ahead of every request. Reads of the pragma answer from this too, so
+	 * the driver sees the value it set rather than a fresh session's default.
+	 *
+	 * @var bool
+	 */
+	private $foreign_keys_enabled = false;
 
 	/**
 	 * Whether the schema information cache is enabled.
@@ -465,6 +480,48 @@ class WP_SQLite_Turso_Connection implements WP_SQLite_Connection_Interface {
 	 */
 	private function maybe_intercept_query( string $sql ): ?PDOStatement {
 		$normalized = strtolower( ltrim( $sql ) );
+
+		if ( 0 === strpos( $normalized, 'pragma' ) ) {
+			// PRAGMA foreign_keys (read): answer from the tracked state.
+			if ( 'pragma foreign_keys' === rtrim( $normalized, '; ' ) ) {
+				return $this->create_statement(
+					array(
+						'columns' => array( 'foreign_keys' ),
+						'rows'    => array( array( $this->foreign_keys_enabled ? 1 : 0 ) ),
+						'meta'    => array(
+							'changes'     => 0,
+							'last_row_id' => 0,
+						),
+					)
+				);
+			}
+
+			// PRAGMA foreign_keys = ON|OFF (write): track it, and make the
+			// transport carry it into every request from now on.
+			if ( 1 === preg_match( '/^pragma\s+foreign_keys\s*=\s*(on|off|true|false|1|0)\s*;?\s*$/', $normalized, $matches ) ) {
+				$this->foreign_keys_enabled = in_array( $matches[1], array( 'on', 'true', '1' ), true );
+				/*
+				 * Always state the value, OFF included. Whether a session persists
+				 * on Turso Cloud depends on whether the HTTP connection is reused
+				 * and which node it lands on, so an omitted pragma can leave a
+				 * stale ON in place from an earlier request.
+				 */
+				$this->transport->set_session_statements(
+					array( 'PRAGMA foreign_keys = ' . ( $this->foreign_keys_enabled ? 'ON' : 'OFF' ) )
+				);
+				return $this->create_statement(
+					array(
+						'columns' => array(),
+						'rows'    => array(),
+						'meta'    => array(
+							'changes'     => 0,
+							'last_row_id' => 0,
+						),
+					)
+				);
+			}
+		}
+
 		if ( 0 === strpos( $normalized, 'select' ) && false !== strpos( $normalized, 'sqlite_temp_master' ) ) {
 			return $this->create_statement(
 				array(

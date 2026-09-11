@@ -35,6 +35,22 @@ trait WP_SQLite_Turso_Protocol {
 	protected $pipeline_path = '/v2/pipeline';
 
 	/**
+	 * Statements sent ahead of every request. See the transport interface.
+	 *
+	 * @var string[]
+	 */
+	protected $session_statements = array();
+
+	/**
+	 * Set statements to run at the start of every request. See the interface.
+	 *
+	 * @param string[] $statements SQL statements, run in order.
+	 */
+	public function set_session_statements( array $statements ): void {
+		$this->session_statements = array_values( $statements );
+	}
+
+	/**
 	 * Send an HTTP POST request to the Turso server.
 	 *
 	 * @param  string $path The endpoint path.
@@ -86,15 +102,25 @@ trait WP_SQLite_Turso_Protocol {
 			return array();
 		}
 
-		// BEGIN, the statements chained on success, then COMMIT or ROLLBACK.
-		$steps = array( array( 'stmt' => array( 'sql' => 'BEGIN' ) ) );
+		/*
+		 * Session statements first, unconditionally -- a pragma cannot change
+		 * inside a transaction -- then BEGIN, the statements chained on success,
+		 * then COMMIT or ROLLBACK. Every step index below is offset by the
+		 * session prefix.
+		 */
+		$steps = array();
+		foreach ( $this->session_statements as $sql ) {
+			$steps[] = array( 'stmt' => array( 'sql' => $sql ) );
+		}
+		$offset  = count( $steps );
+		$steps[] = array( 'stmt' => array( 'sql' => 'BEGIN' ) );
 		foreach ( array_values( $statements ) as $index => $statement ) {
 			$steps[] = array(
 				'stmt'      => $this->stmt( $statement[0], $statement[1] ?? array() ),
 				// Each step runs only if the one before it did.
 				'condition' => array(
 					'type' => 'ok',
-					'step' => $index,
+					'step' => $offset + $index,
 				),
 			);
 		}
@@ -140,7 +166,8 @@ trait WP_SQLite_Turso_Protocol {
 		}
 
 		$results = array();
-		for ( $i = 1, $count = count( $statements ); $i <= $count; $i++ ) {
+		$first   = $offset + 1; // past the session prefix and the BEGIN
+		for ( $i = $first, $last = $offset + count( $statements ); $i <= $last; $i++ ) {
 			$step = $step_results[ $i ] ?? null;
 			if ( ! is_array( $step ) ) {
 				throw WP_SQLite_Turso_Exception::from_transport_failure(
@@ -160,10 +187,15 @@ trait WP_SQLite_Turso_Protocol {
 	 * @throws WP_SQLite_Turso_Exception When the request or any statement fails.
 	 */
 	private function pipeline( array $requests ): array {
-		$body    = $this->send_pipeline( $requests );
+		$prefix = array();
+		foreach ( $this->session_statements as $sql ) {
+			$prefix[] = $this->execute_request( $sql );
+		}
+
+		$body    = $this->send_pipeline( array_merge( $prefix, $requests ) );
 		$results = array();
 		foreach ( array_keys( $requests ) as $index ) {
-			$results[] = $this->unwrap_result( $body, $index, 'execute' );
+			$results[] = $this->unwrap_result( $body, count( $prefix ) + $index, 'execute' );
 		}
 		return $results;
 	}

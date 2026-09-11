@@ -43,4 +43,16 @@ interface WP_SQLite_Turso_Transport_Interface {
 	 * @throws WP_SQLite_Turso_Exception When the execution or transport fails.
 	 */
 	public function batch( array $statements ): array;
+
+	/**
+	 * Set statements to run at the start of every request.
+	 *
+	 * Turso Cloud gives each HTTP request its own session, so connection-scoped
+	 * state such as "PRAGMA foreign_keys" does not survive from one request to
+	 * the next. Statements set here are sent ahead of every query and batch, in
+	 * the same round trip, which makes the state hold as if the session did.
+	 *
+	 * @param string[] $statements SQL statements, run in order.
+	 */
+	public function set_session_statements( array $statements ): void;
 }

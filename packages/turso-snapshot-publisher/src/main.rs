@@ -69,7 +69,8 @@ usage: turso-snapshot-publisher --replica <path> --published <path> --url <url>
 "
 }
 
-fn parse_args() -> Result<Config, String> {
+/// `Ok(None)` means help was requested: print usage and exit successfully.
+fn parse_args() -> Result<Option<Config>, String> {
     let mut replica = None;
     let mut published = None;
     let mut url = None;
@@ -94,18 +95,18 @@ fn parse_args() -> Result<Config, String> {
                 interval = Some(Duration::from_secs(seconds));
             }
             "--once" => once = true,
-            "-h" | "--help" => return Err(usage().to_string()),
+            "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument: {other}\n\n{}", usage())),
         }
     }
 
-    Ok(Config {
+    Ok(Some(Config {
         replica: replica.ok_or("--replica is required")?,
         published: published.ok_or("--published is required")?,
         url: url.ok_or("--url is required")?,
         token: token.filter(|t| !t.is_empty()),
         interval: if once { None } else { interval },
-    })
+    }))
 }
 
 /// Turn a freshly vacuumed database into a rollback-journal one.
@@ -186,7 +187,11 @@ async fn publish(db: &turso::sync::Database, config: &Config) -> Result<(String,
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let config = match parse_args() {
-        Ok(config) => config,
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            print!("{}", usage());
+            return ExitCode::SUCCESS;
+        }
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::from(2);
