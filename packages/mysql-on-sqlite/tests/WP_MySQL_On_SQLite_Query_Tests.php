@@ -127,7 +127,7 @@ class WP_MySQL_On_SQLite_Query_Tests extends TestCase {
 				var_export( $query, true )
 			);
 			$message .= sprintf( 'Error message is: %s', $e->getMessage() );
-			wp_die( $message, 'Database Error!' );
+			throw new RuntimeException( $message, 0, $e );
 		}
 
 		/* Mock up some metadata rows. When meta_key starts with _, the custom field isn't visible to the editor.  */

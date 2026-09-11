@@ -1,0 +1,89 @@
+name: Turso Backend Tests
+
+on:
+  push:
+    branches:
+      - trunk
+      - d1-support
+      - turso-support
+    paths:
+      - '.github/workflows/turso-backend-tests.yml'
+      - 'packages/mysql-on-sqlite/**'
+      - 'packages/turso-snapshot-publisher/**'
+  pull_request:
+    paths:
+      - '.github/workflows/turso-backend-tests.yml'
+      - 'packages/mysql-on-sqlite/**'
+      - 'packages/turso-snapshot-publisher/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # The driver test suites running against the Turso connection backend
+  # (over the fake Turso transport; no server needed).
+  driver-suites:
+    name: Driver suites on Turso backend / PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php: [ '8.0', '8.1', '8.4' ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo, pdo_sqlite, curl
+          coverage: none
+
+      - name: Install dependencies
+        working-directory: packages/mysql-on-sqlite
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run the driver suites against the Turso backend
+        working-directory: packages/mysql-on-sqlite
+        env:
+          WP_SQLITE_TEST_BACKEND: turso
+        run: ./vendor/bin/phpunit tests/WP_MySQL_On_SQLite_Tests.php tests/WP_MySQL_On_SQLite_Query_Tests.php tests/WP_MySQL_On_SQLite_Metadata_Tests.php tests/WP_MySQL_On_SQLite_PDO_API_Tests.php
+
+  # The snapshot publisher: lint and build. It is exercised against a real
+  # server by src/turso/verify-against-server.php, which needs a tursodb; that
+  # stays a local check until one is packaged for CI.
+  publisher:
+    name: Snapshot publisher
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/turso-snapshot-publisher
+
+      - name: Lint
+        working-directory: packages/turso-snapshot-publisher
+        run: cargo fmt --check && cargo clippy --no-deps -- -D warnings
+
+      - name: Build
+        working-directory: packages/turso-snapshot-publisher
+        run: cargo build --release
+
+      - name: Smoke test
+        working-directory: packages/turso-snapshot-publisher
+        run: ./target/release/turso-snapshot-publisher --help

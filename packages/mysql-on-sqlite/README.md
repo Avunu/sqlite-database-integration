@@ -137,7 +137,7 @@ composer run test -- --filter testName
 
 ## Requirements
 
-- **PHP:** 7.2+
+- **PHP:** 8.0+
 - **PHP extensions:** `pdo`, `pdo_sqlite`
 - **SQLite:** 3.37.0+
 

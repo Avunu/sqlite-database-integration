@@ -1,49 +1,64 @@
 <?php declare(strict_types = 1);
 
 /*
- * The D1 connection implements a PDO-compatible API. Enable PDO class usage:
+ * The Turso connection implements a PDO-compatible API. Enable PDO class usage:
  * phpcs:disable WordPress.DB.RestrictedClasses.mysql__PDO
- * phpcs:disable WordPress.DB.RestrictedClasses.mysql__PDOStatement
  */
 
 /**
- * Cloudflare D1 connection.
+ * A MySQL-on-SQLite connection backed by a remote Turso database.
  *
- * This class implements the SQLite connection interface on top of a remote
- * Cloudflare D1 database, accessed through a transport implementing the D1
- * proxy protocol. Results are served as in-memory statements.
+ * This class implements the SQLite connection interface on top of Turso's
+ * "SQL over HTTP" pipeline endpoint, so the driver can run against a Turso
+ * database with no local SQLite file at all.
  *
- * D1 is a stateless, per-request SQLite service, and this connection reports
- * no support for the optional connection capabilities:
+ * What Turso does and does not give us, all established by probing a
+ * "tursodb --sync-server" instance:
  *
- *   - Interactive transactions and savepoints are not supported. Single
- *     statements are atomic, batches execute atomically, and transaction
- *     control methods are no-ops.
- *   - Temporary tables are not supported.
- *   - User-defined PHP functions cannot run inside a remote database.
- *
- * The MySQL-on-SQLite driver adapts to these constraints through the
- * connection capability API.
+ *   - Write metadata is missing. Every statement reports
+ *     "affected_row_count": 0 and "last_insert_rowid": null, so the transport
+ *     asks for changes() and last_insert_rowid() in the same pipeline request
+ *     as the write. See WP_SQLite_Turso_Protocol.
+ *   - Named parameters bind silently to NULL. Only positional "?" works, which
+ *     is what the driver emits.
+ *   - Batches are not atomic on their own, so the transport wraps them in
+ *     BEGIN / conditional COMMIT / conditional ROLLBACK steps.
+ *   - Interactive transactions cannot be used. A BEGIN in one HTTP request
+ *     stays open on the server's shared connection, and every later BEGIN
+ *     anywhere fails with "cannot start a transaction within a transaction".
+ *     Transactions are therefore reported as unsupported and atomicity comes
+ *     from execute_batch().
+ *   - PRAGMA statements work, but whether they persist depends on the server.
+ *     The CLI sync server shares one connection between every client, so a
+ *     pragma persists (and is shared); Turso Cloud gives each request its own
+ *     session, so it does not. "foreign_keys" is the one the driver relies on,
+ *     so the connection tracks it and has the transport send it ahead of every
+ *     request. Other pragmas pass through and last for the request.
+ *   - Bound parameters are not capped the way D1's are: 1000 in one statement
+ *     is fine. Inlining stays as a safety valve, at a much higher threshold.
  */
-class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
-	/**
-	 * The maximum number of bound parameters per statement accepted by D1.
-	 */
-	const D1_MAX_BOUND_PARAMETERS = 100;
-
+class WP_SQLite_Turso_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * The parameter count threshold at which parameters are inlined.
 	 *
-	 * WordPress composes queries with unbounded "IN (...)" lists that can
-	 * exceed the D1 bound parameter limit. Statements with more parameters
-	 * than this threshold have all their parameters inlined as literals.
+	 * Turso accepts far more bound parameters than D1 does, so this exists
+	 * only to keep a pathological "IN (...)" list from failing outright.
+	 *
+	 * @var int
 	 */
-	const PARAMS_INLINE_THRESHOLD = 90;
+	const PARAMS_INLINE_THRESHOLD = 5000;
 
 	/**
-	 * The D1 transport.
+	 * The fallback SQLite version when the server will not report one.
 	 *
-	 * @var WP_SQLite_D1_Transport_Interface
+	 * @var string
+	 */
+	const FALLBACK_SERVER_VERSION = '3.45.0';
+
+	/**
+	 * The Turso transport.
+	 *
+	 * @var WP_SQLite_Turso_Transport_Interface
 	 */
 	private $transport;
 
@@ -57,8 +72,8 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * Whether fetched values are stringified (PDO::ATTR_STRINGIFY_FETCHES).
 	 *
-	 * Defaults to true: the MySQL-on-SQLite driver expects string values,
-	 * while the D1 protocol carries JSON-native types.
+	 * Defaults to true: the driver expects string values, while the Turso
+	 * protocol carries typed ones.
 	 *
 	 * @var bool
 	 */
@@ -75,9 +90,8 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	 * The error mode (PDO::ATTR_ERRMODE).
 	 *
 	 * Failures always surface as exceptions from the transport. The driver
-	 * still reads and restores this attribute to track the caller's chosen
-	 * error mode while keeping its own internal operations in exception mode,
-	 * so the value is stored and reported back faithfully.
+	 * still reads and restores this attribute, so the value is stored and
+	 * reported back faithfully.
 	 *
 	 * @var int
 	 */
@@ -91,16 +105,17 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	private $last_insert_id = 0;
 
 	/**
-	 * The emulated value of the "PRAGMA foreign_keys" setting.
+	 * The desired value of "PRAGMA foreign_keys".
 	 *
-	 * D1 always enforces foreign keys and doesn't support toggling them
-	 * with "PRAGMA foreign_keys". The setting is emulated: when disabled,
-	 * batches are executed with "PRAGMA defer_foreign_keys = true", which
-	 * defers enforcement to the end of the batch transaction.
+	 * Turso Cloud gives each HTTP request its own session, so the pragma the
+	 * driver sets once at connect time would be gone by its next statement.
+	 * The connection keeps the setting here instead and has the transport send
+	 * it ahead of every request. Reads of the pragma answer from this too, so
+	 * the driver sees the value it set rather than a fresh session's default.
 	 *
 	 * @var bool
 	 */
-	private $foreign_keys_enabled = true;
+	private $foreign_keys_enabled = false;
 
 	/**
 	 * Whether the schema information cache is enabled.
@@ -112,11 +127,10 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * A cache of schema information query results.
 	 *
-	 * The MySQL-on-SQLite driver consults its information schema tables
-	 * repeatedly while translating queries. Over a remote transport, each
-	 * lookup is a network round trip, so results of information schema
-	 * reads are memoized. The cache is invalidated by any statement that
-	 * could change the schema information.
+	 * The driver consults its information schema tables repeatedly while
+	 * translating queries. Over a remote transport each lookup is a round
+	 * trip, so information schema reads are memoized and invalidated by any
+	 * statement that could change the schema.
 	 *
 	 * @var array<string, array>
 	 */
@@ -132,34 +146,34 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * Constructor.
 	 *
-	 * @param WP_SQLite_D1_Transport_Interface $transport The D1 transport.
-	 * @param array                            $options {
+	 * @param WP_SQLite_Turso_Transport_Interface $transport The Turso transport.
+	 * @param array                               $options {
 	 *     Optional. An array of options.
 	 *
 	 *     @type bool $schema_cache Whether to cache schema information reads.
 	 *                              Default true.
 	 * }
 	 */
-	public function __construct( WP_SQLite_D1_Transport_Interface $transport, array $options = array() ) {
+	public function __construct( WP_SQLite_Turso_Transport_Interface $transport, array $options = array() ) {
 		$this->transport            = $transport;
 		$this->schema_cache_enabled = (bool) ( $options['schema_cache'] ?? true );
 	}
 
 	/**
-	 * Get the D1 transport.
+	 * Get the Turso transport.
 	 *
-	 * @return WP_SQLite_D1_Transport_Interface
+	 * @return WP_SQLite_Turso_Transport_Interface
 	 */
-	public function get_transport(): WP_SQLite_D1_Transport_Interface {
+	public function get_transport(): WP_SQLite_Turso_Transport_Interface {
 		return $this->transport;
 	}
 
 	/**
-	 * Execute a query in the D1 database.
+	 * Execute a query in the Turso database.
 	 *
-	 * @param  string $sql   The query to execute.
-	 * @param  array $params The query parameters.
-	 * @throws WP_SQLite_D1_Exception When the query execution fails.
+	 * @param  string $sql    The query to execute.
+	 * @param  array  $params The query parameters.
+	 * @throws WP_SQLite_Turso_Exception When the query execution fails.
 	 * @return PDOStatement  The PDO statement object.
 	 */
 	public function query( string $sql, array $params = array() ): PDOStatement {
@@ -197,14 +211,15 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Execute a batch of queries atomically in the D1 database.
+	 * Execute a batch of queries atomically in the Turso database.
 	 *
-	 * When any query fails, none of the queries take effect.
+	 * When any query fails, none of the queries take effect. The transport
+	 * spells the transaction out as batch steps; see WP_SQLite_Turso_Protocol.
 	 *
 	 * @param  array<int, array{0: string, 1?: array}> $statements
-	 *                       The queries to execute, each being an array of
-	 *                       a query string and optional query parameters.
-	 * @throws WP_SQLite_D1_Exception When the execution of any query fails.
+	 *                        The queries to execute, each being an array of
+	 *                        a query string and optional query parameters.
+	 * @throws WP_SQLite_Turso_Exception When the execution of any query fails.
 	 * @return PDOStatement[] The PDO statement objects, one for each query.
 	 */
 	public function execute_batch( array $statements ): array {
@@ -223,22 +238,7 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 			$prepared[] = $this->maybe_inline_params( $sql, $params );
 		}
 
-		/*
-		 * When foreign keys are disabled, defer their enforcement to the
-		 * end of the batch transaction. This is the D1-supported mechanism
-		 * backing schema changes that recreate tables.
-		 */
-		$has_deferral_prefix = false;
-		if ( ! $this->foreign_keys_enabled ) {
-			array_unshift( $prepared, array( 'PRAGMA defer_foreign_keys = true', array() ) );
-			$has_deferral_prefix = true;
-		}
-
-		$results = $this->transport->batch( $prepared );
-		if ( $has_deferral_prefix ) {
-			array_shift( $results );
-		}
-
+		$results        = $this->transport->batch( $prepared );
 		$statements_out = array();
 		foreach ( $results as $result ) {
 			$this->remember_meta( $result['meta'] );
@@ -248,10 +248,12 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Begin a transaction. Not supported by D1; this is a no-op.
+	 * Begin a transaction. Not supported by Turso over HTTP; this is a no-op.
 	 *
-	 * D1 doesn't support interactive transactions. Single statements are
-	 * atomic, and "execute_batch()" provides multi-statement atomicity.
+	 * A BEGIN issued in one HTTP request stays open on the connection the
+	 * server shares between clients, wedging every later transaction. Single
+	 * statements are atomic, and execute_batch() provides multi-statement
+	 * atomicity.
 	 *
 	 * @param string $behavior The SQLite transaction behavior (ignored).
 	 */
@@ -260,21 +262,21 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Commit the current transaction. Not supported by D1; this is a no-op.
+	 * Commit the current transaction. Not supported; this is a no-op.
 	 */
 	public function commit(): void {
 		// No-op. See begin_transaction().
 	}
 
 	/**
-	 * Roll back the current transaction. Not supported by D1; this is a no-op.
+	 * Roll back the current transaction. Not supported; this is a no-op.
 	 */
 	public function rollback(): void {
 		// No-op. See begin_transaction().
 	}
 
 	/**
-	 * Create a savepoint. Not supported by D1; this is a no-op.
+	 * Create a savepoint. Not supported; this is a no-op.
 	 *
 	 * @param string $name The savepoint name (ignored).
 	 */
@@ -283,7 +285,7 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Release a savepoint. Not supported by D1; this is a no-op.
+	 * Release a savepoint. Not supported; this is a no-op.
 	 *
 	 * @param string $name The savepoint name (ignored).
 	 */
@@ -292,7 +294,7 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Roll back to a savepoint. Not supported by D1; this is a no-op.
+	 * Roll back to a savepoint. Not supported; this is a no-op.
 	 *
 	 * @param string $name The savepoint name (ignored).
 	 */
@@ -301,7 +303,7 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Check if a transaction is currently active. Always false for D1.
+	 * Check if a transaction is currently active. Always false.
 	 *
 	 * @return bool Always false.
 	 */
@@ -338,9 +340,6 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * Quote an SQLite identifier.
 	 *
-	 * Wraps the identifier in backticks and escapes backtick characters
-	 * within. See WP_SQLite_Connection::quote_identifier() for details.
-	 *
 	 * @param  string $unquoted_identifier The unquoted identifier value.
 	 * @return string                      The quoted identifier value.
 	 */
@@ -358,24 +357,20 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Get the SQLite version of the remote D1 database.
+	 * Get the SQLite version of the remote Turso database.
 	 *
-	 * The D1 authorizer may not permit calling "sqlite_version()". In that
-	 * case, a conservative default is assumed — D1 runs recent SQLite
-	 * versions well above the driver's requirements.
-	 *
-	 * @return string The SQLite engine version, e.g. "3.45.1".
+	 * @return string The SQLite engine version, e.g. "3.50.4".
 	 */
 	public function get_server_version(): string {
 		if ( null === $this->server_version ) {
 			try {
 				$result               = $this->transport->query( 'SELECT sqlite_version()' );
 				$this->server_version = (string) ( $result['rows'][0][0] ?? '' );
-			} catch ( WP_SQLite_D1_Exception $e ) {
+			} catch ( WP_SQLite_Turso_Exception $e ) {
 				$this->server_version = '';
 			}
 			if ( '' === $this->server_version ) {
-				$this->server_version = '3.45.0';
+				$this->server_version = self::FALLBACK_SERVER_VERSION;
 			}
 		}
 		return $this->server_version;
@@ -437,7 +432,7 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Register a user-defined SQL function. Not supported by D1.
+	 * Register a user-defined SQL function. Not supported remotely.
 	 *
 	 * PHP callbacks cannot run inside a remote database.
 	 *
@@ -452,7 +447,9 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * Check whether the connection supports an optional capability.
 	 *
-	 * A D1 connection supports none of the optional capabilities.
+	 * None of them, for the reasons given in the class description: a BEGIN
+	 * outlives its HTTP request, temporary tables would live on a connection
+	 * shared with other clients, and PHP callbacks cannot run server-side.
 	 *
 	 * @param  string $capability One of the CAPABILITY_* interface constants.
 	 * @return bool               Always false.
@@ -471,28 +468,21 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	}
 
 	/**
-	 * Intercept SQLite statements that D1 doesn't support.
+	 * Intercept statements that should not reach Turso.
 	 *
-	 * The MySQL-on-SQLite driver emits a small set of statements that are
-	 * local-database concepts. These are handled here, so that the driver
-	 * itself remains backend-agnostic:
+	 * Unlike the D1 backend, PRAGMA statements are passed through: Turso
+	 * honours them, "foreign_keys" included. Only reads of the temporary
+	 * table master need heading off, and that is defensive -- temporary
+	 * tables are gated by the capability API.
 	 *
-	 *   - "PRAGMA foreign_keys" reads and writes are emulated locally.
-	 *     See the "$foreign_keys_enabled" property.
-	 *   - Other PRAGMA statements are attempted against D1, degrading to
-	 *     an empty result when D1 rejects them.
-	 *   - Reads from "sqlite_temp_master" return an empty result. This is
-	 *     defensive; temporary tables are gated by the capability API.
-	 *
-	 * @param  string $sql         The SQL statement.
-	 * @return PDOStatement|null   The intercepted result, or null to proceed
-	 *                             with normal execution.
+	 * @param  string $sql       The SQL statement.
+	 * @return PDOStatement|null The intercepted result, or null to proceed.
 	 */
 	private function maybe_intercept_query( string $sql ): ?PDOStatement {
-		$normalized = strtolower( trim( $sql ) );
+		$normalized = strtolower( ltrim( $sql ) );
 
 		if ( 0 === strpos( $normalized, 'pragma' ) ) {
-			// PRAGMA foreign_keys (read).
+			// PRAGMA foreign_keys (read): answer from the tracked state.
 			if ( 'pragma foreign_keys' === rtrim( $normalized, '; ' ) ) {
 				return $this->create_statement(
 					array(
@@ -506,30 +496,29 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 				);
 			}
 
-			// PRAGMA foreign_keys = ON|OFF (write).
+			// PRAGMA foreign_keys = ON|OFF (write): track it, and make the
+			// transport carry it into every request from now on.
 			if ( 1 === preg_match( '/^pragma\s+foreign_keys\s*=\s*(on|off|true|false|1|0)\s*;?\s*$/', $normalized, $matches ) ) {
 				$this->foreign_keys_enabled = in_array( $matches[1], array( 'on', 'true', '1' ), true );
-				return $this->create_empty_statement();
-			}
-
-			/*
-			 * Attempt other PRAGMA statements, degrading to an empty result when
-			 * D1 will not run them -- but not when the statement names something
-			 * that does not exist. That is a real error the caller has to see:
-			 * "CHECK TABLE missing" has to report a missing table rather than a
-			 * clean bill of health.
-			 */
-			try {
-				$result = $this->transport->query( $sql );
-				return $this->create_statement( $result );
-			} catch ( WP_SQLite_D1_Exception $e ) {
-				// The "errorInfo" property name is defined by PDOException.
-				// phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
-				$message = $e->errorInfo[2] ?? $e->getMessage();
-				if ( 1 === preg_match( '/\bno such (?:table|column|index)\b/i', (string) $message ) ) {
-					throw $e;
-				}
-				return $this->create_empty_statement();
+				/*
+				 * Always state the value, OFF included. Whether a session persists
+				 * on Turso Cloud depends on whether the HTTP connection is reused
+				 * and which node it lands on, so an omitted pragma can leave a
+				 * stale ON in place from an earlier request.
+				 */
+				$this->transport->set_session_statements(
+					array( 'PRAGMA foreign_keys = ' . ( $this->foreign_keys_enabled ? 'ON' : 'OFF' ) )
+				);
+				return $this->create_statement(
+					array(
+						'columns' => array(),
+						'rows'    => array(),
+						'meta'    => array(
+							'changes'     => 0,
+							'last_row_id' => 0,
+						),
+					)
+				);
 			}
 		}
 
@@ -545,7 +534,6 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 				)
 			);
 		}
-
 		return null;
 	}
 
@@ -591,10 +579,6 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 	/**
 	 * Inline query parameters when the statement has too many of them.
 	 *
-	 * D1 rejects statements with more than 100 bound parameters, which
-	 * WordPress can exceed with large "IN (...)" lists. Above a threshold,
-	 * all positional placeholders are replaced with quoted literals.
-	 *
 	 * @param  string $sql    The SQL statement with "?" placeholders.
 	 * @param  array  $params The positional query parameters.
 	 * @return array{0: string, 1: array} The statement and parameters to send.
@@ -630,8 +614,8 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 			}
 
 			if ( '?' === $char ) {
-				$inlined  .= $this->quote( $params[ $position ] ?? null );
-				$position += 1;
+				$inlined .= $this->quote( $params[ $position ] ?? null );
+				++$position;
 				continue;
 			}
 
@@ -666,24 +650,6 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 			$this->stringify_fetches,
 			array(),
 			$this->default_fetch_mode
-		);
-	}
-
-	/**
-	 * Create an empty in-memory statement with no columns and no rows.
-	 *
-	 * @return WP_PDO_Array_Statement The statement.
-	 */
-	private function create_empty_statement(): WP_PDO_Array_Statement {
-		return $this->create_statement(
-			array(
-				'columns' => array(),
-				'rows'    => array(),
-				'meta'    => array(
-					'changes'     => 0,
-					'last_row_id' => 0,
-				),
-			)
 		);
 	}
 }

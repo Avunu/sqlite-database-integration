@@ -562,6 +562,8 @@ class WP_MySQL_On_SQLite_PDO_API_Tests extends TestCase {
 	 * @dataProvider data_pdo_fetch_methods
 	 */
 	public function test_query_with_fetch_mode( $query, $mode, $expected ): void {
+		$this->skip_fetch_named_without_a_native_statement( $mode );
+
 		$stmt   = $this->driver->query( $query, $mode );
 		$result = $stmt->fetch();
 
@@ -1064,9 +1066,31 @@ class WP_MySQL_On_SQLite_PDO_API_Tests extends TestCase {
 	}
 
 	/**
+	 * Skip PDO::FETCH_NAMED where a pure-PHP result set cannot reproduce it.
+	 *
+	 * PDO returns every FETCH_NAMED key as a string, including numeric column
+	 * names, which it manages by building the array below the language. PHP
+	 * itself converts a numeric-string key to an integer, so a backend whose
+	 * statements are plain arrays -- every remote backend -- cannot produce the
+	 * same keys. Only this one fetch mode is affected.
+	 *
+	 * @param int $mode The fetch mode under test.
+	 */
+	private function skip_fetch_named_without_a_native_statement( int $mode ): void {
+		if ( PDO::FETCH_NAMED === $mode && 'pdo' !== wp_sqlite_tests_backend() ) {
+			$this->markTestSkipped(
+				'PDO::FETCH_NAMED returns numeric column names as string array keys,'
+				. ' which a pure-PHP array cannot represent.'
+			);
+		}
+	}
+
+	/**
 	 * @dataProvider data_pdo_fetch_methods
 	 */
 	public function test_fetch( $query, $mode, $expected ): void {
+		$this->skip_fetch_named_without_a_native_statement( $mode );
+
 		$stmt   = $this->driver->query( $query );
 		$result = $stmt->fetch( $mode );
 

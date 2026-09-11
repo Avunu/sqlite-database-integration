@@ -177,6 +177,16 @@ class WP_PDO_Array_Statement extends PDOStatement {
 	private $cursor = 0;
 
 	/**
+	 * Columns bound to PHP variables by bindColumn(), for PDO::FETCH_BOUND.
+	 *
+	 * Keyed by the identifier the caller gave, holding a reference to their
+	 * variable and the column position it resolves to.
+	 *
+	 * @var array<string|int, array{var: mixed, column: int}>
+	 */
+	private $bound_columns = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string[] $columns           The column names, in order. Duplicates are allowed.
@@ -283,9 +293,7 @@ class WP_PDO_Array_Statement extends PDOStatement {
 		$row           = $this->rows[ $this->cursor ];
 		$this->cursor += 1;
 
-		if ( ! array_key_exists( $column, $row ) ) {
-			throw new ValueError( 'Invalid column index' );
-		}
+		$this->assert_column_index( $column );
 		return $this->output_value( $row[ $column ] );
 	}
 
@@ -364,7 +372,12 @@ class WP_PDO_Array_Statement extends PDOStatement {
 	 *                     or null if there is no error.
 	 */
 	public function errorCode(): ?string {
-		throw new RuntimeException( 'Not implemented' );
+		/*
+		 * An in-memory statement only exists once its statement succeeded:
+		 * failures are thrown before one is constructed. So there is never an
+		 * error to report, which is the SQLSTATE for successful completion.
+		 */
+		return '00000';
 	}
 
 	/**
@@ -376,7 +389,8 @@ class WP_PDO_Array_Statement extends PDOStatement {
 	 *                 2: Driver-specific error message.
 	 */
 	public function errorInfo(): array {
-		throw new RuntimeException( 'Not implemented' );
+		// See errorCode(). PDO reports the driver fields as null on success.
+		return array( '00000', null, null );
 	}
 
 	/**
@@ -407,7 +421,16 @@ class WP_PDO_Array_Statement extends PDOStatement {
 	 * @return Iterator The iterator for the result set.
 	 */
 	public function getIterator(): Iterator {
-		throw new RuntimeException( 'Not implemented' );
+		/*
+		 * PDO iterates the remaining rows in the statement's fetch mode, and
+		 * consumes them as it goes -- iterating twice yields nothing the second
+		 * time. Reading through fetch() reproduces both.
+		 *
+		 * Relies on PDOStatement implementing IteratorAggregate, which it does
+		 * from PHP 8.0 -- the floor for this fork. Before that it iterated through
+		 * an internal handler no subclass could override.
+		 */
+		return new ArrayIterator( $this->fetchAllRows() );
 	}
 
 	/**
@@ -425,7 +448,12 @@ class WP_PDO_Array_Statement extends PDOStatement {
 	 * @return bool True on success, false on failure.
 	 */
 	public function closeCursor(): bool {
-		$this->cursor = 0;
+		/*
+		 * PDO discards the rest of the result set rather than rewinding it: after
+		 * closeCursor() a fetch() returns false, and only a re-execute() makes
+		 * the rows available again.
+		 */
+		$this->cursor = count( $this->rows );
 		return true;
 	}
 
@@ -440,7 +468,42 @@ class WP_PDO_Array_Statement extends PDOStatement {
 	 * @return bool                      True on success, false on failure.
 	 */
 	public function bindColumn( $column, &$var, $type = null, $maxLength = null, $driverOptions = null ): bool {
-		throw new RuntimeException( 'Not implemented' );
+		$position = $this->resolve_column_position( $column );
+		if ( null === $position ) {
+			// Matches PDO, which refuses rather than silently ignoring.
+			throw new PDOException(
+				sprintf(
+					"SQLSTATE[HY000]: General error: Did not find column name '%s' in the defined columns;"
+					. ' it will not be bound',
+					$column
+				)
+			);
+		}
+
+		// Hold the caller's variable by reference so PDO::FETCH_BOUND can write
+		// to it on every fetch.
+		$this->bound_columns[ $column ] = array(
+			'var'    => &$var,
+			'column' => $position,
+		);
+		return true;
+	}
+
+	/**
+	 * Resolve a bindColumn() identifier to a column position.
+	 *
+	 * @param  int|string $column A 1-indexed column number or a column name.
+	 * @return int|null           The 0-indexed position, or null when unknown.
+	 */
+	private function resolve_column_position( $column ): ?int {
+		if ( is_int( $column ) || ( is_string( $column ) && ctype_digit( $column ) ) ) {
+			// PDO numbers columns from 1 here, unlike everywhere else.
+			$position = (int) $column - 1;
+			return isset( $this->columns[ $position ] ) ? $position : null;
+		}
+
+		$position = array_search( (string) $column, $this->columns, true );
+		return false === $position ? null : (int) $position;
 	}
 
 	/**
@@ -551,13 +614,23 @@ class WP_PDO_Array_Statement extends PDOStatement {
 			case PDO::FETCH_ASSOC:
 				return $this->format_row_assoc( $row );
 			case PDO::FETCH_BOTH:
-				// As per PDO, for each column, the associative key is followed
-				// by the numeric key. Duplicate names keep their first position.
+				/*
+				 * As per PDO, for each column the associative key is followed by
+				 * the numeric one, and the two behave differently when they
+				 * collide. A repeated name takes the later value while keeping
+				 * its first position, but a numeric index is only filled when it
+				 * is still free -- so a column *named* "2" keeps key 2, and the
+				 * third column then has no numeric key at all. PHP turns a
+				 * numeric-string key into an integer, which is what makes the
+				 * two namespaces overlap in the first place.
+				 */
 				$values = array();
 				foreach ( $this->columns as $i => $name ) {
 					$value           = $this->output_value( $row[ $i ] ?? null );
 					$values[ $name ] = $value;
-					$values[ $i ]    = $value;
+					if ( ! array_key_exists( $i, $values ) ) {
+						$values[ $i ] = $value;
+					}
 				}
 				return $values;
 			case PDO::FETCH_NAMED:
@@ -575,9 +648,7 @@ class WP_PDO_Array_Statement extends PDOStatement {
 				return $named;
 			case PDO::FETCH_COLUMN:
 				$column = $args[0] ?? 0;
-				if ( ! array_key_exists( $column, $row ) ) {
-					throw new ValueError( 'Invalid column index' );
-				}
+				$this->assert_column_index( $column, $row );
 				return $this->output_value( $row[ $column ] );
 			case PDO::FETCH_KEY_PAIR:
 				if ( 2 !== count( $this->columns ) ) {
@@ -592,6 +663,16 @@ class WP_PDO_Array_Statement extends PDOStatement {
 				$class            = $args[0] ?? 'stdClass';
 				$constructor_args = $args[1] ?? array();
 				return $this->create_object( $class, $constructor_args, $row );
+			case PDO::FETCH_BOUND:
+				/*
+				 * Write each bound column into the caller's variable and report
+				 * only success; PDO returns true rather than the row here.
+				 */
+				foreach ( $this->bound_columns as &$binding ) {
+					$binding['var'] = $this->output_value( $row[ $binding['column'] ] ?? null );
+				}
+				unset( $binding );
+				return true;
 			case PDO::FETCH_INTO:
 				$object = $args[0] ?? null;
 				if ( ! is_object( $object ) ) {
@@ -603,6 +684,26 @@ class WP_PDO_Array_Statement extends PDOStatement {
 				return $object;
 			default:
 				throw new RuntimeException( 'Not implemented' );
+		}
+	}
+
+	/**
+	 * Validate a column index, raising what PDO raises.
+	 *
+	 * PDO distinguishes the two ways an index can be wrong: a negative one is
+	 * rejected outright, while one past the end of the row is an invalid index.
+	 *
+	 * @param  mixed      $column The column index to validate.
+	 * @param  array|null $row    The row to check the upper bound against.
+	 * @throws ValueError         When the index is not usable.
+	 */
+	private function assert_column_index( $column, ?array $row = null ): void {
+		if ( is_int( $column ) && $column < 0 ) {
+			throw new ValueError( 'Column index must be greater than or equal to 0' );
+		}
+		$row = $row ?? ( $this->rows[ $this->cursor - 1 ] ?? array() );
+		if ( ! array_key_exists( $column, $row ) ) {
+			throw new ValueError( 'Invalid column index' );
 		}
 	}
 

@@ -13,3 +13,4 @@ composer.lock
 /packages/d1-proxy-worker/node_modules/
 /packages/d1-proxy-worker/.wrangler/
 /packages/php-ext-wp-d1-client/target/
+/packages/turso-snapshot-publisher/target/

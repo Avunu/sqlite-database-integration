@@ -24,7 +24,7 @@ The monorepo packages are placed under the `packages` directory.
 The WordPress plugin links the MySQL on SQLite package using a symlink. The build
 script replaces the symlink with a copy of the package for release.
 
-The codebase is pure PHP with zero dependencies. It supports PHP 7.2 through 8.5,
+The codebase is pure PHP with zero dependencies. It supports PHP 8.0 through 8.5,
 MySQL syntax from version 5.7 onward, and requires SQLite 3.37.0 or newer
 (with legacy mode down to 3.27.0).
 
@@ -177,7 +177,7 @@ In particular:
 - **PDO API:** MySQL on SQLite must match the PDO MySQL driver API as closely as possible.
 - **MySQL binary protocol:** The MySQL proxy must follow the MySQL binary protocol
   as closely as possible.
-- **PHP version support:** All PHP versions starting from **PHP 7.2** must be supported.
+- **PHP version support:** All PHP versions starting from **PHP 8.0** must be supported. This fork does not carry the 7.x series; the `PHP_VERSION_ID < 80000` shims that remain are inherited and may be removed.
   It is possible to use PHP version checks when needed.
 - **SQLite version support:** All SQLite versions starting from **SQLite 3.37.0** must be
   supported. Older versions (down to 3.27.0) have limited compatibility and require setting

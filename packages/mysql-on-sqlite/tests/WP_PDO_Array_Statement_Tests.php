@@ -365,8 +365,16 @@ class WP_PDO_Array_Statement_Tests extends TestCase {
 		$this->assertTrue( $stmt->execute() );
 		$this->assertSame( count( self::ROWS ), count( $stmt->fetchAll( PDO::FETCH_NUM ) ) );
 
+		/*
+		 * closeCursor() discards the rest of the result set rather than
+		 * rewinding it, as PDO does: fetching afterwards yields nothing until
+		 * the statement is executed again.
+		 */
 		$stmt->fetch( PDO::FETCH_NUM );
 		$this->assertTrue( $stmt->closeCursor() );
+		$this->assertSame( array(), $stmt->fetchAll( PDO::FETCH_NUM ) );
+
+		$this->assertTrue( $stmt->execute() );
 		$this->assertSame( count( self::ROWS ), count( $stmt->fetchAll( PDO::FETCH_NUM ) ) );
 	}
 
@@ -387,7 +395,46 @@ class WP_PDO_Array_Statement_Tests extends TestCase {
 	public function test_unsupported_fetch_modes_throw(): void {
 		$stmt = $this->create_array_statement();
 		$this->expectException( RuntimeException::class );
-		$stmt->fetch( PDO::FETCH_BOUND );
+		$stmt->fetch( PDO::FETCH_LAZY );
+	}
+
+	public function test_fetch_bound_writes_into_bound_variables(): void {
+		$stmt = $this->create_array_statement();
+
+		$id   = null;
+		$name = null;
+		$this->assertTrue( $stmt->bindColumn( 1, $id ) );
+		$this->assertTrue( $stmt->bindColumn( 'name', $name ) );
+
+		// PDO::FETCH_BOUND reports success rather than returning the row.
+		$this->assertTrue( $stmt->fetch( PDO::FETCH_BOUND ) );
+		$this->assertSame( self::ROWS[0][0], $id );
+		$this->assertSame( self::ROWS[0][1], $name );
+	}
+
+	public function test_bind_column_rejects_an_unknown_column(): void {
+		$stmt = $this->create_array_statement();
+		$var  = null;
+
+		$this->expectException( PDOException::class );
+		$stmt->bindColumn( 'no_such_column', $var );
+	}
+
+	public function test_error_information_reports_success(): void {
+		$stmt = $this->create_array_statement();
+
+		$this->assertSame( '00000', $stmt->errorCode() );
+		$this->assertSame( array( '00000', null, null ), $stmt->errorInfo() );
+	}
+
+	public function test_iteration_yields_the_remaining_rows(): void {
+		$stmt = $this->create_array_statement();
+		$stmt->setFetchMode( PDO::FETCH_NUM );
+
+		$this->assertSame( self::ROWS, iterator_to_array( $stmt ) );
+
+		// Iteration consumes the result set, as PDO's does.
+		$this->assertSame( array(), iterator_to_array( $stmt ) );
 	}
 
 	public function test_key_pair_requires_two_columns(): void {

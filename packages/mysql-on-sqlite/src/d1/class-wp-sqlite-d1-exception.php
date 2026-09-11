@@ -36,19 +36,22 @@ class WP_SQLite_D1_Exception extends PDOException {
 
 		if ( null !== $error_code && 0 === strpos( $error_code, 'SQLITE_CONSTRAINT' ) ) {
 			// SQLite error code 19: SQLITE_CONSTRAINT.
-			$sqlstate = '23000';
-			$message  = 'Integrity constraint violation: 19 ' . $message;
+			$sqlstate    = '23000';
+			$driver_code = 19;
+			$prefix      = 'Integrity constraint violation: 19 ';
 		} elseif ( 'SQLITE_BUSY' === $error_code || 'SQLITE_LOCKED' === $error_code ) {
 			// SQLite error codes 5 and 6: SQLITE_BUSY and SQLITE_LOCKED.
-			$sqlstate = 'HY000';
-			$message  = 'General error: 5 ' . $message;
+			$sqlstate    = 'HY000';
+			$driver_code = 5;
+			$prefix      = 'General error: 5 ';
 		} else {
 			// SQLite error code 1: SQLITE_ERROR (also used as a fallback).
-			$sqlstate = 'HY000';
-			$message  = 'General error: 1 ' . $message;
+			$sqlstate    = 'HY000';
+			$driver_code = 1;
+			$prefix      = 'General error: 1 ';
 		}
 
-		return self::create( $sqlstate, $message );
+		return self::create( $sqlstate, $prefix . $message, $driver_code, $message );
 	}
 
 	/**
@@ -62,18 +65,32 @@ class WP_SQLite_D1_Exception extends PDOException {
 	 * @return self
 	 */
 	public static function from_transport_failure( string $message, ?Throwable $previous = null ): self {
-		return self::create( '08006', $message, $previous );
+		return self::create( '08006', $message, null, $message, $previous );
 	}
 
 	/**
 	 * Create an exception with the PDO error shape.
 	 *
-	 * @param  string         $sqlstate The SQLSTATE error code.
-	 * @param  string         $message  The error message.
-	 * @param  Throwable|null $previous The previous exception, if any.
+	 * PDO splits the two: getMessage() carries the SQLSTATE and the driver's
+	 * decoration, while errorInfo carries the driver's own code and its
+	 * *undecorated* message. The driver matches on errorInfo to recognise
+	 * SQLite errors and give them their MySQL identity, so the raw message has
+	 * to survive there.
+	 *
+	 * @param  string         $sqlstate       The SQLSTATE error code.
+	 * @param  string         $message        The decorated message, as PDO renders it.
+	 * @param  int|null       $driver_code    The SQLite error code, if known.
+	 * @param  string|null    $driver_message The undecorated driver message.
+	 * @param  Throwable|null $previous       The previous exception, if any.
 	 * @return self
 	 */
-	private static function create( string $sqlstate, string $message, ?Throwable $previous = null ): self {
+	private static function create(
+		string $sqlstate,
+		string $message,
+		?int $driver_code = null,
+		?string $driver_message = null,
+		?Throwable $previous = null
+	): self {
 		$exception = new self(
 			sprintf( 'SQLSTATE[%s]: %s', $sqlstate, $message ),
 			0,
@@ -86,7 +103,7 @@ class WP_SQLite_D1_Exception extends PDOException {
 
 		// The "errorInfo" property name is defined by PDOException.
 		// phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
-		$exception->errorInfo = array( $sqlstate, null, $message );
+		$exception->errorInfo = array( $sqlstate, $driver_code, $driver_message ?? $message );
 		return $exception;
 	}
 }

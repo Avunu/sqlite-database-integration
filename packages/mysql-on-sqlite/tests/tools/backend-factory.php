@@ -10,6 +10,10 @@
  *   - "d1": the Cloudflare D1 connection over a fake transport enforcing
  *     D1 semantics (no transactions, no temporary tables, no user-defined
  *     functions, JSON value coercion) against a local SQLite database.
+ *   - "turso": the Turso connection over a fake transport enforcing Turso's
+ *     "SQL over HTTP" semantics against a local SQLite database. The optional
+ *     capabilities it withholds are the same ones D1 withholds, for different
+ *     reasons -- see WP_SQLite_Turso_Fake_Transport.
  *
  * phpcs:disable WordPress.DB.RestrictedClasses.mysql__PDO
  */
@@ -19,10 +23,15 @@ if ( 'd1' === getenv( 'WP_SQLITE_TEST_BACKEND' ) ) {
 	require_once __DIR__ . '/class-wp-sqlite-d1-fake-transport.php';
 }
 
+if ( 'turso' === getenv( 'WP_SQLITE_TEST_BACKEND' ) ) {
+	require_once __DIR__ . '/../../src/turso/load.php';
+	require_once __DIR__ . '/class-wp-sqlite-turso-fake-transport.php';
+}
+
 /**
  * Get the connection backend to run driver tests against.
  *
- * @return string The backend name: "pdo" or "d1".
+ * @return string The backend name: "pdo", "d1", or "turso".
  */
 function wp_sqlite_tests_backend(): string {
 	$backend = getenv( 'WP_SQLITE_TEST_BACKEND' );
@@ -49,6 +58,13 @@ function wp_sqlite_tests_create_engine( ?PDO &$sqlite = null, string $db_name = 
 
 		// Transactional statements are ignored: PHPUnit converts the
 		// "warn" fallback warnings to test errors.
+		return new WP_SQLite_Driver( $connection, $db_name, 80038, array( 'transaction_fallback' => 'ignore' ) );
+	}
+
+	if ( 'turso' === wp_sqlite_tests_backend() ) {
+		$sqlite->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
+		$connection = new WP_SQLite_Turso_Connection( new WP_SQLite_Turso_Fake_Transport( $sqlite ) );
+
 		return new WP_SQLite_Driver( $connection, $db_name, 80038, array( 'transaction_fallback' => 'ignore' ) );
 	}
 
@@ -84,6 +100,19 @@ function wp_sqlite_tests_create_pdo_engine( string $dsn, ?PDO &$sqlite = null ):
 			)
 		);
 	}
+
+	if ( 'turso' === wp_sqlite_tests_backend() ) {
+		$sqlite->setAttribute( PDO::ATTR_STRINGIFY_FETCHES, true );
+		return new WP_MySQL_On_SQLite(
+			$dsn,
+			null,
+			null,
+			array(
+				'sqlite_connection'    => new WP_SQLite_Turso_Connection( new WP_SQLite_Turso_Fake_Transport( $sqlite ) ),
+				'transaction_fallback' => 'ignore',
+			)
+		);
+	}
 	return new WP_MySQL_On_SQLite( $dsn, null, null, array( 'sqlite_pdo' => $sqlite ) );
 }
 
@@ -94,22 +123,32 @@ function wp_sqlite_tests_create_pdo_engine( string $dsn, ?PDO &$sqlite = null ):
  * @param PHPUnit\Framework\TestCase $test The current test instance.
  */
 function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): void {
-	if ( 'd1' !== wp_sqlite_tests_backend() ) {
+	$backend = wp_sqlite_tests_backend();
+	if ( 'd1' !== $backend && 'turso' !== $backend ) {
 		return;
 	}
 
+	$name = 'd1' === $backend ? 'D1' : 'Turso';
+
 	$reasons = array(
-		'transactions'     => 'D1 does not support interactive transactions.',
-		'temporary tables' => 'D1 does not support temporary tables.',
-		'REGEXP'           => 'D1 does not support the REGEXP operator (no user-defined functions).',
-		'seeded RAND'      => 'D1 does not support seeded RAND(N) (no user-defined functions).',
+		'transactions'     => $name . ' does not support interactive transactions.',
+		'temporary tables' => $name . ' does not support temporary tables.',
+		'REGEXP'           => $name . ' does not support the REGEXP operator (no user-defined functions).',
+		'seeded RAND'      => $name . ' does not support seeded RAND(N) (no user-defined functions).',
 		'strict messages'  => 'Strict mode error messages differ without user-defined functions.',
 		'PHP evaluation'   => 'The function requires constant arguments without user-defined functions.',
-		'column metadata'  => 'Detailed column metadata is not carried by the D1 protocol.',
+		'column metadata'  => 'Detailed column metadata is not carried by the ' . $name . ' protocol.',
 		'native types'     => 'The fake transport cannot carry native value types before PHP 8.1.',
+		'savepoints'       => $name . ' does not support savepoints.',
+		'native statement' => 'The test inspects the PDO SQLite handle behind the connection, which a remote backend does not have.',
 	);
 
-	$skip_list = wp_sqlite_tests_d1_skip_list();
+	/*
+	 * Both remote backends withhold the same four optional capabilities, so the
+	 * set of tests they cannot run is the same -- for different reasons, which
+	 * the connection classes document.
+	 */
+	$skip_list = wp_sqlite_tests_remote_backend_skip_list();
 	$test_name = get_class( $test ) . '::' . $test->getName( false );
 	if ( isset( $skip_list[ $test_name ] ) ) {
 		$test->markTestSkipped( $reasons[ $skip_list[ $test_name ] ] );
@@ -117,11 +156,14 @@ function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): v
 }
 
 /**
- * The list of tests not supported by the D1 backend, with skip reasons.
+ * The list of tests a remote backend cannot run, with skip reasons.
+ *
+ * Shared by the D1 and Turso backends: they withhold the same four optional
+ * capabilities, so the same tests are out of reach for both.
  *
  * @return array<string, string> A map of "Class::method" to a reason key.
  */
-function wp_sqlite_tests_d1_skip_list(): array {
+function wp_sqlite_tests_remote_backend_skip_list(): array {
 	$list = array(
 		// Interactive transactions and savepoints.
 		'WP_MySQL_On_SQLite_Tests::testStartTransactionCommand' => 'transactions',
@@ -130,7 +172,43 @@ function wp_sqlite_tests_d1_skip_list(): array {
 		'WP_MySQL_On_SQLite_Tests::testTransactionSavepoints' => 'transactions',
 		'WP_MySQL_On_SQLite_Tests::testRollbackNonExistentTransactionSavepoint' => 'transactions',
 
+		/*
+		 * Savepoint semantics. Without transactions a savepoint has nothing to
+		 * roll back to, so these assert behaviour the fallback cannot produce:
+		 * either an error that is no longer raised, or a write that is no longer
+		 * undone.
+		 */
+		'WP_MySQL_On_SQLite_Tests::testSavepointWithoutTransactionDoesNotStartTransaction' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testReleaseSavepointWithoutTransaction' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testMissingSavepointDoesNotRollbackTransaction' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testDuplicateSavepointNameReplacesOldSavepoint' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testReleaseSavepointDeletesNestedSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testRollbackToSavepointDeletesNestedSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testCommitDeletesSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testRollbackDeletesSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_duplicate_savepoint_names_roll_back_to_the_latest' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_quoted_savepoint_names_are_case_insensitive' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_failed_write_after_standalone_savepoint_keeps_autocommit' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_releasing_savepoint_inside_explicit_transaction_keeps_transaction_active' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_write_inside_savepoint_can_be_rolled_back' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_writes_inside_nested_savepoints_preserve_outer_changes' => 'savepoints',
+
+		// Asserts that BEGIN IMMEDIATE, COMMIT and ROLLBACK reach SQLite.
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_transaction_methods_flush_operation_state' => 'transactions',
+
+		/*
+		 * These reach past the connection to the PDO SQLite handle behind it,
+		 * for the driver name and for lazily resolved column metadata. A remote
+		 * backend has no such handle.
+		 */
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_reports_mysql_driver_name' => 'native statement',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_statement_column_metadata_is_resolved_lazily' => 'native statement',
+
+		// LIKE BINARY against a non-constant pattern needs a user-defined function.
+		'WP_MySQL_On_SQLite_Tests::testLikeBinaryPreservesPatternBytes' => 'PHP evaluation',
+
 		// Temporary tables.
+		'WP_MySQL_On_SQLite_Metadata_Tests::testTemporaryTableAutoIncrement' => 'temporary tables',
 		'WP_MySQL_On_SQLite_Tests::testCreateTemporaryTable' => 'temporary tables',
 		'WP_MySQL_On_SQLite_Tests::testCreateTemporaryTableIfNotExists' => 'temporary tables',
 		'WP_MySQL_On_SQLite_Tests::testLockTemporaryTables' => 'temporary tables',
