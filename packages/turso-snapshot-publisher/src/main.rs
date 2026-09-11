@@ -152,9 +152,12 @@ async fn publish(db: &turso::sync::Database, config: &Config) -> Result<(String,
     .map_err(|e| format!("VACUUM INTO failed: {e}"))?;
     let vacuum_ms = vacuum_started.elapsed().as_secs_f64() * 1000.0;
 
-    // VACUUM INTO can leave an empty -wal beside its output.
+    // VACUUM INTO can leave empty sidecars beside its output: SQLite-style
+    // "-wal"/"-shm", and Turso's own log, which it names by *replacing* the
+    // path's last extension -- so "snapshot.db.new" gets "snapshot.db.db-log".
     let _ = fs::remove_file(format!("{}-wal", tmp.display()));
     let _ = fs::remove_file(format!("{}-shm", tmp.display()));
+    let _ = fs::remove_file(tmp.with_extension("db-log"));
 
     set_rollback_journal(&tmp).map_err(|e| format!("could not set the journal mode: {e}"))?;
 
