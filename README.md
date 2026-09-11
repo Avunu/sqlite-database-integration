@@ -6,6 +6,12 @@ MAINTENANCE: Update this file when:
 - Adding new architectural patterns or conventions
 -->
 
+> **Archived.** This fork has been superseded by
+> [**Avunu/wordpress-sqlite-anywhere**](https://github.com/Avunu/wordpress-sqlite-anywhere),
+> which wraps upstream [WordPress/sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration)
+> as a submodule pinned to release tags and carries the Cloudflare D1 and Turso
+> backends alongside it as one WordPress plugin. Nothing here is maintained.
+
 # SQLite database integration
 This project implements SQLite database support for MySQL-based projects.
 
