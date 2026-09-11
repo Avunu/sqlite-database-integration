@@ -1,0 +1,18 @@
+[package]
+name = "turso_snapshot_publisher"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Publishes a readable SQLite snapshot of a Turso database for the MySQL-on-SQLite driver"
+
+[[bin]]
+name = "turso-snapshot-publisher"
+path = "src/main.rs"
+
+[dependencies]
+turso = { version = "0.8.0-pre.10", default-features = false, features = ["sync"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "signal"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
