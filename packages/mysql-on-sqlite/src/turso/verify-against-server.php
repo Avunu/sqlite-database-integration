@@ -17,6 +17,12 @@
  *
  * It writes to the database it is pointed at, and cleans up after itself.
  */
+/*
+ * A standalone CLI probe, not WordPress code: it opens the snapshot with PDO
+ * directly to show what the snapshot does and does not contain.
+ *
+ * phpcs:disable WordPress.DB.RestrictedClasses.mysql__PDO
+ */
 require_once __DIR__ . '/load.php';
 
 $snapshot = getenv( 'SNAPSHOT' );
@@ -47,7 +53,7 @@ printf( "  latched  = %s\n", $connection->is_latched() ? 'yes' : 'no' );
 print_r( $connection->get_counters() );
 
 section( 'a write latches to the primary' );
-$marker = 'latch-test-' . getmypid();
+$marker    = 'latch-test-' . getmypid();
 $statement = $connection->query(
 	'INSERT INTO wp_options (option_name, option_value, autoload) VALUES (?, ?, ?)',
 	array( $marker, 'written', 'no' )

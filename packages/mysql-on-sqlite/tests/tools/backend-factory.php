@@ -139,6 +139,8 @@ function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): v
 		'PHP evaluation'   => 'The function requires constant arguments without user-defined functions.',
 		'column metadata'  => 'Detailed column metadata is not carried by the ' . $name . ' protocol.',
 		'native types'     => 'The fake transport cannot carry native value types before PHP 8.1.',
+		'savepoints'       => $name . ' does not support savepoints.',
+		'native statement' => 'The test inspects the PDO SQLite handle behind the connection, which a remote backend does not have.',
 	);
 
 	/*
@@ -146,7 +148,7 @@ function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): v
 	 * set of tests they cannot run is the same -- for different reasons, which
 	 * the connection classes document.
 	 */
-	$skip_list = wp_sqlite_tests_d1_skip_list();
+	$skip_list = wp_sqlite_tests_remote_backend_skip_list();
 	$test_name = get_class( $test ) . '::' . $test->getName( false );
 	if ( isset( $skip_list[ $test_name ] ) ) {
 		$test->markTestSkipped( $reasons[ $skip_list[ $test_name ] ] );
@@ -154,11 +156,14 @@ function wp_sqlite_tests_skip_unsupported( PHPUnit\Framework\TestCase $test ): v
 }
 
 /**
- * The list of tests not supported by the D1 backend, with skip reasons.
+ * The list of tests a remote backend cannot run, with skip reasons.
+ *
+ * Shared by the D1 and Turso backends: they withhold the same four optional
+ * capabilities, so the same tests are out of reach for both.
  *
  * @return array<string, string> A map of "Class::method" to a reason key.
  */
-function wp_sqlite_tests_d1_skip_list(): array {
+function wp_sqlite_tests_remote_backend_skip_list(): array {
 	$list = array(
 		// Interactive transactions and savepoints.
 		'WP_MySQL_On_SQLite_Tests::testStartTransactionCommand' => 'transactions',
@@ -167,7 +172,43 @@ function wp_sqlite_tests_d1_skip_list(): array {
 		'WP_MySQL_On_SQLite_Tests::testTransactionSavepoints' => 'transactions',
 		'WP_MySQL_On_SQLite_Tests::testRollbackNonExistentTransactionSavepoint' => 'transactions',
 
+		/*
+		 * Savepoint semantics. Without transactions a savepoint has nothing to
+		 * roll back to, so these assert behaviour the fallback cannot produce:
+		 * either an error that is no longer raised, or a write that is no longer
+		 * undone.
+		 */
+		'WP_MySQL_On_SQLite_Tests::testSavepointWithoutTransactionDoesNotStartTransaction' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testReleaseSavepointWithoutTransaction' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testMissingSavepointDoesNotRollbackTransaction' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testDuplicateSavepointNameReplacesOldSavepoint' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testReleaseSavepointDeletesNestedSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testRollbackToSavepointDeletesNestedSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testCommitDeletesSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_Tests::testRollbackDeletesSavepoints' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_duplicate_savepoint_names_roll_back_to_the_latest' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_quoted_savepoint_names_are_case_insensitive' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_failed_write_after_standalone_savepoint_keeps_autocommit' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_releasing_savepoint_inside_explicit_transaction_keeps_transaction_active' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_write_inside_savepoint_can_be_rolled_back' => 'savepoints',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_writes_inside_nested_savepoints_preserve_outer_changes' => 'savepoints',
+
+		// Asserts that BEGIN IMMEDIATE, COMMIT and ROLLBACK reach SQLite.
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_transaction_methods_flush_operation_state' => 'transactions',
+
+		/*
+		 * These reach past the connection to the PDO SQLite handle behind it,
+		 * for the driver name and for lazily resolved column metadata. A remote
+		 * backend has no such handle.
+		 */
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_reports_mysql_driver_name' => 'native statement',
+		'WP_MySQL_On_SQLite_PDO_API_Tests::test_statement_column_metadata_is_resolved_lazily' => 'native statement',
+
+		// LIKE BINARY against a non-constant pattern needs a user-defined function.
+		'WP_MySQL_On_SQLite_Tests::testLikeBinaryPreservesPatternBytes' => 'PHP evaluation',
+
 		// Temporary tables.
+		'WP_MySQL_On_SQLite_Metadata_Tests::testTemporaryTableAutoIncrement' => 'temporary tables',
 		'WP_MySQL_On_SQLite_Tests::testCreateTemporaryTable' => 'temporary tables',
 		'WP_MySQL_On_SQLite_Tests::testCreateTemporaryTableIfNotExists' => 'temporary tables',
 		'WP_MySQL_On_SQLite_Tests::testLockTemporaryTables' => 'temporary tables',

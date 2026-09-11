@@ -490,7 +490,17 @@ class WP_SQLite_Turso_Connection implements WP_SQLite_Connection_Interface {
 		if ( 1 !== preg_match( '/^\s*SELECT\b/i', $sql ) ) {
 			return false;
 		}
-		return false !== stripos( $sql, '_wp_sqlite_' ) || false !== stripos( $sql, 'sqlite_master' );
+		if ( false === stripos( $sql, '_wp_sqlite_' ) && false === stripos( $sql, 'sqlite_master' ) ) {
+			return false;
+		}
+
+		/*
+		 * Some information schema reads join "sqlite_sequence" to report the next
+		 * AUTO_INCREMENT value. That depends on row data, not on the schema: a
+		 * plain INSERT moves it without touching anything this cache invalidates
+		 * on. Such a read has to go to the database every time.
+		 */
+		return false === stripos( $sql, 'sqlite_sequence' );
 	}
 
 	/**

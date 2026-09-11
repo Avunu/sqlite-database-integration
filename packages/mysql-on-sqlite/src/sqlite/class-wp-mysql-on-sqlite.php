@@ -738,6 +738,19 @@ class WP_MySQL_On_SQLite extends PDO {
 	private $transaction_fallback_warning_issued = false;
 
 	/**
+	 * Whether a transaction opened through the PDO API is being emulated.
+	 *
+	 * Set when beginTransaction() is called on a connection without transaction
+	 * support, where the statement itself is only passed to the configured
+	 * fallback. Tracking it keeps the PDO API contract intact -- a second BEGIN
+	 * still errors, a COMMIT after a BEGIN still succeeds -- without claiming
+	 * through inTransaction() that statements are isolated, which they are not.
+	 *
+	 * @var bool
+	 */
+	private $emulated_transaction_active = false;
+
+	/**
 	 * The PDO fetch mode used for the emulated query.
 	 *
 	 * @var mixed
@@ -1383,11 +1396,21 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return bool True on success, false on failure.
 	 */
 	public function beginTransaction(): bool {
-		if ( $this->inTransaction() ) {
+		if ( $this->has_active_transaction() ) {
 			throw $this->new_driver_exception( 'There is already an active transaction' );
 		}
 		$this->flush();
 		$this->begin_user_transaction();
+
+		/*
+		 * On a connection without transaction support, begin_user_transaction()
+		 * only runs the configured fallback, so track the transaction here. The
+		 * statements are not actually isolated, but the API bookkeeping still
+		 * has to hold: a second BEGIN is an error, and a COMMIT is not.
+		 */
+		if ( ! $this->connection->has_capability( WP_SQLite_Connection_Interface::CAPABILITY_TRANSACTIONS ) ) {
+			$this->emulated_transaction_active = true;
+		}
 		return true;
 	}
 
@@ -1397,10 +1420,11 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return bool True on success, false on failure.
 	 */
 	public function commit(): bool {
-		if ( ! $this->inTransaction() ) {
+		if ( ! $this->has_active_transaction() ) {
 			throw $this->new_driver_exception( 'There is no active transaction' );
 		}
 		$this->flush();
+		$this->emulated_transaction_active = false;
 		$this->commit_user_transaction();
 		return true;
 	}
@@ -1411,12 +1435,27 @@ class WP_MySQL_On_SQLite extends PDO {
 	 * @return bool True on success, false on failure.
 	 */
 	public function rollBack(): bool {
-		if ( ! $this->inTransaction() ) {
+		if ( ! $this->has_active_transaction() ) {
 			throw $this->new_driver_exception( 'There is no active transaction' );
 		}
 		$this->flush();
+		$this->emulated_transaction_active = false;
 		$this->rollback_user_transaction();
 		return true;
+	}
+
+	/**
+	 * Whether a transaction opened through the PDO API is active.
+	 *
+	 * This covers the emulated transaction a connection without transaction
+	 * support gets, which inTransaction() deliberately does not report: the
+	 * driver's own logic must keep seeing the real connection state.
+	 *
+	 * @return bool True when beginTransaction() has been called and not yet
+	 *              committed or rolled back.
+	 */
+	private function has_active_transaction(): bool {
+		return $this->inTransaction() || $this->emulated_transaction_active;
 	}
 
 	/**
@@ -4175,7 +4214,13 @@ class WP_MySQL_On_SQLite extends PDO {
 							sprintf( 'PRAGMA integrity_check(%s)', $quoted_table_name )
 						);
 						$errors = $stmt->fetchAll( PDO::FETCH_COLUMN );
-						if ( 'ok' === $errors[0] ) {
+						/*
+						 * A healthy table answers with the single row "ok", which is
+						 * a status rather than an error. A connection that cannot run
+						 * the pragma at all answers with nothing, which is likewise
+						 * no errors to report -- and must not be indexed into.
+						 */
+						if ( array() !== $errors && 'ok' === $errors[0] ) {
 							array_shift( $errors );
 						}
 						break;

@@ -36,22 +36,32 @@ class WP_SQLite_Turso_Exception extends PDOException {
 
 		if ( 1 === preg_match( '/\bconstraint failed\b/i', $message ) ) {
 			// SQLite error code 19: SQLITE_CONSTRAINT.
-			$sqlstate = '23000';
-			$message  = 'Integrity constraint violation: 19 ' . $message;
+			$sqlstate    = '23000';
+			$driver_code = 19;
+			$prefix      = 'Integrity constraint violation: 19 ';
 		} elseif ( 1 === preg_match( '/\b(?:database is locked|database table is locked)\b/i', $message ) ) {
 			// SQLite error codes 5 and 6: SQLITE_BUSY and SQLITE_LOCKED.
-			$sqlstate = 'HY000';
-			$message  = 'General error: 5 ' . $message;
+			$sqlstate    = 'HY000';
+			$driver_code = 5;
+			$prefix      = 'General error: 5 ';
 		} else {
 			// SQLite error code 1: SQLITE_ERROR (also used as a fallback).
-			$sqlstate = 'HY000';
-			$message  = 'General error: 1 ' . $message;
+			$sqlstate    = 'HY000';
+			$driver_code = 1;
+			$prefix      = 'General error: 1 ';
 		}
 
-		$exception       = new self( sprintf( 'SQLSTATE[%s]: %s', $sqlstate, $message ), 0 );
+		/*
+		 * PDO splits the two: getMessage() carries the SQLSTATE and the driver's
+		 * decoration, while errorInfo carries the driver's code and its
+		 * *undecorated* message. The driver matches on errorInfo to recognise
+		 * SQLite errors and give them their MySQL identity -- "no such table: x"
+		 * becoming 42S02 / 1146 -- so the raw message has to survive there.
+		 */
+		$exception       = new self( sprintf( 'SQLSTATE[%s]: %s%s', $sqlstate, $prefix, $message ), 0 );
 		$exception->code = $sqlstate;
 		// phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
-		$exception->errorInfo = array( $sqlstate, 1, $message );
+		$exception->errorInfo = array( $sqlstate, $driver_code, $message );
 
 		if ( null !== $error_code ) {
 			$exception->turso_error_code = $error_code;

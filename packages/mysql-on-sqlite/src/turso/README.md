@@ -104,11 +104,15 @@ This runs the driver suite against `WP_SQLite_Turso_Connection` over
 table above against a local SQLite database — and round-trips values through the
 real protocol codec, so its type handling is exercised rather than approximated.
 
-The Turso backend's failures are currently a **strict subset** of the D1
-backend's: 60 tests fail on both, one fails only on D1, and none fail only on
-Turso. Those 60 are pre-existing gaps in the remote-backend path rather than
-anything Turso-specific, and they group into: tests needing a real PDO SQLite
-handle, `WP_PDO_Array_Statement` methods that raise "Not implemented"
-(`bindColumn`, iteration, `errorInfo`), transaction and savepoint tests that are
-not on the skip list, temporary-table tests likewise, and the UDF-less rewrite
-path calling `wp_die()` where WordPress is not loaded.
+`WP_SQLITE_TEST_BACKEND=turso composer run test` is **green**: 1084 tests, 0
+failures, 102 skipped. So is `d1`, and so is the default `pdo` backend — the
+remote-backend gaps that used to fail were shared, and closing them fixed both.
+
+The 102 skips are the tests a remote backend genuinely cannot run, and the skip
+list names a reason for each: transactions and savepoints (a `BEGIN` cannot
+outlive its HTTP request), temporary tables, `REGEXP` and seeded `RAND(N)` and
+the other PHP-evaluated functions (no user-defined functions), detailed column
+metadata, the two tests that reach past the connection to a PDO SQLite handle
+that is not there, and `PDO::FETCH_NAMED`, which returns numeric column names as
+*string* array keys — something PDO builds below the language and a pure-PHP
+array cannot represent.

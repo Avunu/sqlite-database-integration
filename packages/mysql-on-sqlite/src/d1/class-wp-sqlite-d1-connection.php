@@ -512,11 +512,23 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 				return $this->create_empty_statement();
 			}
 
-			// Attempt other PRAGMA statements, degrading to an empty result.
+			/*
+			 * Attempt other PRAGMA statements, degrading to an empty result when
+			 * D1 will not run them -- but not when the statement names something
+			 * that does not exist. That is a real error the caller has to see:
+			 * "CHECK TABLE missing" has to report a missing table rather than a
+			 * clean bill of health.
+			 */
 			try {
 				$result = $this->transport->query( $sql );
 				return $this->create_statement( $result );
 			} catch ( WP_SQLite_D1_Exception $e ) {
+				// The "errorInfo" property name is defined by PDOException.
+				// phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
+				$message = $e->errorInfo[2] ?? $e->getMessage();
+				if ( 1 === preg_match( '/\bno such (?:table|column|index)\b/i', (string) $message ) ) {
+					throw $e;
+				}
 				return $this->create_empty_statement();
 			}
 		}
@@ -547,7 +559,17 @@ class WP_SQLite_D1_Connection implements WP_SQLite_Connection_Interface {
 		if ( 1 !== preg_match( '/^\s*SELECT\b/i', $sql ) ) {
 			return false;
 		}
-		return false !== stripos( $sql, '_wp_sqlite_' ) || false !== stripos( $sql, 'sqlite_master' );
+		if ( false === stripos( $sql, '_wp_sqlite_' ) && false === stripos( $sql, 'sqlite_master' ) ) {
+			return false;
+		}
+
+		/*
+		 * Some information schema reads join "sqlite_sequence" to report the next
+		 * AUTO_INCREMENT value. That depends on row data, not on the schema: a
+		 * plain INSERT moves it without touching anything this cache invalidates
+		 * on. Such a read has to go to the database every time.
+		 */
+		return false === stripos( $sql, 'sqlite_sequence' );
 	}
 
 	/**
