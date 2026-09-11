@@ -80,8 +80,7 @@ fn parse_args() -> Result<Config, String> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| -> Result<String, String> {
-            args.next()
-                .ok_or_else(|| format!("{name} needs a value"))
+            args.next().ok_or_else(|| format!("{name} needs a value"))
         };
         match arg.as_str() {
             "--replica" => replica = Some(PathBuf::from(value("--replica")?)),
@@ -142,7 +141,10 @@ async fn publish(db: &turso::sync::Database, config: &Config) -> Result<(String,
         .map_err(|e| format!("could not connect to the replica: {e}"))?;
     conn.execute(
         // The path is ours, not user input, but quote it the way SQL requires.
-        &format!("VACUUM INTO '{}'", tmp.display().to_string().replace('\'', "''")),
+        &format!(
+            "VACUUM INTO '{}'",
+            tmp.display().to_string().replace('\'', "''")
+        ),
         (),
     )
     .await
@@ -162,7 +164,9 @@ async fn publish(db: &turso::sync::Database, config: &Config) -> Result<(String,
             .map_err(|e| format!("could not set permissions: {e}"))?;
     }
 
-    let size = fs::metadata(&tmp).map_err(|e| format!("could not stat the snapshot: {e}"))?.len();
+    let size = fs::metadata(&tmp)
+        .map_err(|e| format!("could not stat the snapshot: {e}"))?
+        .len();
     fs::rename(&tmp, &config.published)
         .map_err(|e| format!("could not publish the snapshot: {e}"))?;
 
@@ -195,14 +199,12 @@ async fn main() -> ExitCode {
         }
     }
 
-    let mut builder = turso::sync::Builder::new_remote(
-        &config.replica.display().to_string(),
-    )
-    .with_remote_url(config.url.clone())
-    .with_client_name("turso-snapshot-publisher")
-    .bootstrap_if_empty(true)
-    // VACUUM is gated behind this; it is how the snapshot is written.
-    .experimental_vacuum(true);
+    let mut builder = turso::sync::Builder::new_remote(&config.replica.display().to_string())
+        .with_remote_url(config.url.clone())
+        .with_client_name("turso-snapshot-publisher")
+        .bootstrap_if_empty(true)
+        // VACUUM is gated behind this; it is how the snapshot is written.
+        .experimental_vacuum(true);
     if let Some(token) = &config.token {
         builder = builder.with_auth_token(token.clone());
     }
@@ -210,7 +212,10 @@ async fn main() -> ExitCode {
     let db = match builder.build().await {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("could not open the replica at {}: {e}", config.replica.display());
+            eprintln!(
+                "could not open the replica at {}: {e}",
+                config.replica.display()
+            );
             return ExitCode::FAILURE;
         }
     };

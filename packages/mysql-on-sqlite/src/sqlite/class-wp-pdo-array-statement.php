@@ -425,6 +425,12 @@ class WP_PDO_Array_Statement extends PDOStatement {
 		 * PDO iterates the remaining rows in the statement's fetch mode, and
 		 * consumes them as it goes -- iterating twice yields nothing the second
 		 * time. Reading through fetch() reproduces both.
+		 *
+		 * This takes effect from PHP 8.0, where PDOStatement implements
+		 * IteratorAggregate. Before that, PDOStatement is Traversable through
+		 * an internal handler that a subclass cannot override, so foreach over
+		 * an in-memory statement yields nothing there. Nothing in the driver
+		 * iterates a statement; it fetches.
 		 */
 		return new ArrayIterator( $this->fetchAllRows() );
 	}
